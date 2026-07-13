@@ -1,0 +1,6 @@
+{
+  "name": "SmartInventory",
+  "description": "An intelligent warehouse inventory tracking application utilizing simulated visual AI detection.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
