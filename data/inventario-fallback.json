@@ -1,0 +1,44 @@
+[
+  {
+    "id": "scan-fb-001",
+    "fecha": "2026-07-13T09:00:00Z",
+    "urlImagen": "https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?auto=format&fit=crop&q=80&w=800",
+    "detecciones": [
+      {
+        "item": "cajas",
+        "cantidad": 45
+      },
+      {
+        "item": "botellas",
+        "cantidad": 20
+      },
+      {
+        "item": "laptops",
+        "cantidad": 4
+      },
+      {
+        "item": "herramientas",
+        "cantidad": 12
+      }
+    ],
+    "warehouseSummary": "Línea de base de respaldo para el almacén principal. El conteo muestra racks de nivel medio totalmente ocupados.",
+    "confirmado": true
+  },
+  {
+    "id": "scan-fb-002",
+    "fecha": "2026-07-13T09:15:00Z",
+    "urlImagen": "https://images.unsplash.com/photo-1578575437130-527eed3abbec?auto=format&fit=crop&q=80&w=800",
+    "detecciones": [
+      {
+        "item": "cajas",
+        "cantidad": 15
+      },
+      {
+        "item": "herramientas",
+        "cantidad": 6
+      }
+    ],
+    "warehouseSummary": "Respaldo de zona de embarque. Se detectó actividad de movimiento de carga y herramientas de soporte fuera de caja.",
+    "confirmado": false
+  }
+]

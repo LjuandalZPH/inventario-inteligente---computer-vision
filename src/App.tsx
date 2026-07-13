@@ -24,13 +24,49 @@ import ReportDetail from "./components/inventory/report-detail";
 import mockWarehouseImg from "./assets/images/mock_warehouse_1783951947353.jpg";
 
 export default function App() {
-  const [scans, setScans] = useState<InventoryScan[]>(MOCK_SCANS);
+  const [scans, setScans] = useState<InventoryScan[]>(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("smartinventory_scans");
+      if (saved) {
+        try {
+          return JSON.parse(saved);
+        } catch (e) {
+          console.error("Failed to load scans from localStorage:", e);
+        }
+      }
+    }
+    return MOCK_SCANS;
+  });
+  
   const [activeRoute, setActiveRoute] = useState<{ path: "dashboard" | "report"; id?: string }>({
     path: "dashboard"
   });
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [committedScans, setCommittedScans] = useState<Set<string>>(new Set(["scan-001"])); // scan-001 is committed by default
+  
+  const [committedScans, setCommittedScans] = useState<Set<string>>(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("smartinventory_committed");
+      if (saved) {
+        try {
+          return new Set(JSON.parse(saved));
+        } catch (e) {
+          console.error("Failed to load committed scans from localStorage:", e);
+        }
+      }
+    }
+    return new Set(["scan-001"]);
+  });
+
+  // Synchronize scans list with localStorage
+  React.useEffect(() => {
+    localStorage.setItem("smartinventory_scans", JSON.stringify(scans));
+  }, [scans]);
+
+  // Synchronize committed scans set with localStorage
+  React.useEffect(() => {
+    localStorage.setItem("smartinventory_committed", JSON.stringify(Array.from(committedScans)));
+  }, [committedScans]);
 
   // Filter scans chronologically (newest first)
   const filteredScans = useMemo(() => {
@@ -80,12 +116,12 @@ export default function App() {
     setActiveRoute({ path: "report", id: newScan.id });
   };
 
-  const handleCommitStock = (scanId: string) => {
-    setCommittedScans(prev => {
-      const updated = new Set(prev);
-      updated.add(scanId);
-      return updated;
-    });
+  const handleCommitStock = async (scanId: string) => {
+    const scanToCommit = scans.find(s => s.id === scanId);
+    if (!scanToCommit) return;
+
+    // Vuelve a la lógica original: solo actualiza el estado en el frontend.
+    setCommittedScans(prev => new Set(prev).add(scanId));
   };
 
   return (
