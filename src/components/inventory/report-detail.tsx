@@ -8,11 +8,13 @@ import {
   ArrowLeft,
   CheckCircle2,
   Clock3,
+  Download,
   Eye,
   EyeOff,
   GlassWater,
   Info,
   Laptop,
+  LoaderCircle,
   Minus,
   Package,
   Plus,
@@ -93,6 +95,176 @@ const ITEM_STYLES: Record<
     icon: Wrench,
   },
 };
+
+const PDF_BOX_COLORS: Record<
+  AllowedItemType,
+  string
+> = {
+  cajas: "#fbbf24",
+  botellas: "#38bdf8",
+  laptops: "#818cf8",
+  herramientas: "#34d399",
+};
+
+function loadBrowserImage(
+  source: string,
+): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+
+    image.onload = () => resolve(image);
+    image.onerror = () =>
+      reject(
+        new Error(
+          "No fue posible cargar la imagen del análisis.",
+        ),
+      );
+
+    if (!source.startsWith("data:")) {
+      image.crossOrigin = "anonymous";
+    }
+
+    image.src = source;
+  });
+}
+
+async function createAnnotatedImage(
+  source: string,
+  predictions: InventoryPrediction[],
+): Promise<{
+  dataUrl: string;
+  width: number;
+  height: number;
+}> {
+  const image = await loadBrowserImage(source);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+
+  const context = canvas.getContext("2d");
+
+  if (!context) {
+    throw new Error(
+      "El navegador no pudo preparar la imagen para el PDF.",
+    );
+  }
+
+  context.drawImage(
+    image,
+    0,
+    0,
+    canvas.width,
+    canvas.height,
+  );
+
+  const lineWidth = Math.max(
+    2,
+    Math.round(canvas.width / 500),
+  );
+  const fontSize = Math.max(
+    14,
+    Math.round(canvas.width / 55),
+  );
+  const labelPadding = Math.max(
+    5,
+    Math.round(fontSize * 0.35),
+  );
+
+  context.lineWidth = lineWidth;
+  context.font = `bold ${fontSize}px Arial`;
+  context.textBaseline = "top";
+
+  for (const prediction of predictions) {
+    const [rawX1, rawY1, rawX2, rawY2] =
+      prediction.box;
+
+    const x1 = Math.max(
+      0,
+      Math.min(canvas.width, rawX1),
+    );
+    const y1 = Math.max(
+      0,
+      Math.min(canvas.height, rawY1),
+    );
+    const x2 = Math.max(
+      x1,
+      Math.min(canvas.width, rawX2),
+    );
+    const y2 = Math.max(
+      y1,
+      Math.min(canvas.height, rawY2),
+    );
+
+    const boxWidth = x2 - x1;
+    const boxHeight = y2 - y1;
+    const color =
+      PDF_BOX_COLORS[prediction.className];
+
+    context.strokeStyle = color;
+    context.strokeRect(
+      x1,
+      y1,
+      boxWidth,
+      boxHeight,
+    );
+
+    const label =
+      `${prediction.className} ` +
+      `${(prediction.score * 100).toFixed(1)}%`;
+
+    const textWidth =
+      context.measureText(label).width;
+    const labelWidth =
+      textWidth + labelPadding * 2;
+    const labelHeight =
+      fontSize + labelPadding * 2;
+
+    const labelX = Math.min(
+      x1,
+      Math.max(0, canvas.width - labelWidth),
+    );
+    const labelY =
+      y1 >= labelHeight
+        ? y1 - labelHeight
+        : y1;
+
+    context.fillStyle = color;
+    context.fillRect(
+      labelX,
+      labelY,
+      labelWidth,
+      labelHeight,
+    );
+
+    context.fillStyle = "#0f172a";
+    context.fillText(
+      label,
+      labelX + labelPadding,
+      labelY + labelPadding,
+    );
+  }
+
+  return {
+    dataUrl: canvas.toDataURL(
+      "image/jpeg",
+      0.9,
+    ),
+    width: canvas.width,
+    height: canvas.height,
+  };
+}
+
+function sanitizePdfFileName(
+  value: string,
+): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9-_]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
 
 function createEmptyCountMap(): CountMap {
   return {
@@ -195,6 +367,11 @@ export default function ReportDetail({
     useState<AllowedItemType | null>(null);
   const [showDetections, setShowDetections] =
     useState(true);
+  const [isGeneratingPdf, setIsGeneratingPdf] =
+    useState(false);
+  const [pdfError, setPdfError] = useState<
+    string | null
+  >(null);
   const [containerSize, setContainerSize] =
     useState<Size>({
       width: 0,
@@ -283,6 +460,16 @@ export default function ReportDetail({
     [predictions],
   );
 
+  const detectedCategories = ITEM_CATEGORIES.filter(
+    (category) => editableCounts[category] > 0,
+  ).length;
+
+  const confidenceThreshold = 35;
+
+  const analysisStatus = isCommitted
+    ? "Confirmado"
+    : "Pendiente de validación";
+
   const overlayGeometry = useMemo(() => {
     if (
       imageSize.width <= 0 ||
@@ -363,6 +550,506 @@ export default function ReportDetail({
       scan.id,
       correctedDetections,
     );
+  };
+
+  const handleDownloadPdf = async () => {
+    if (isGeneratingPdf) {
+      return;
+    }
+
+    setIsGeneratingPdf(true);
+    setPdfError(null);
+
+    try {
+      const { jsPDF } = await import("jspdf");
+
+      const pdf = new jsPDF({
+        orientation: "portrait",
+        unit: "mm",
+        format: "a4",
+        compress: true,
+      });
+
+      const pageWidth =
+        pdf.internal.pageSize.getWidth();
+      const pageHeight =
+        pdf.internal.pageSize.getHeight();
+      const margin = 14;
+      const contentWidth =
+        pageWidth - margin * 2;
+      let cursorY = 16;
+
+      const ensureSpace = (
+        requiredHeight: number,
+      ) => {
+        if (
+          cursorY + requiredHeight >
+          pageHeight - 18
+        ) {
+          pdf.addPage();
+          cursorY = 16;
+        }
+      };
+
+      const drawLabelValue = (
+        label: string,
+        value: string,
+        x: number,
+        y: number,
+        width: number,
+      ) => {
+        pdf.setFillColor(248, 250, 252);
+        pdf.setDrawColor(203, 213, 225);
+        pdf.roundedRect(
+          x,
+          y,
+          width,
+          17,
+          2,
+          2,
+          "FD",
+        );
+
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(7.5);
+        pdf.setTextColor(100, 116, 139);
+        pdf.text(label.toUpperCase(), x + 3, y + 5);
+
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(10);
+        pdf.setTextColor(15, 23, 42);
+
+        const valueLines = pdf.splitTextToSize(
+          value,
+          width - 6,
+        );
+
+        pdf.text(
+          valueLines.slice(0, 2),
+          x + 3,
+          y + 11,
+        );
+      };
+
+      pdf.setFillColor(15, 23, 42);
+      pdf.rect(
+        0,
+        0,
+        pageWidth,
+        33,
+        "F",
+      );
+
+      pdf.setTextColor(45, 212, 191);
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(10);
+      pdf.text(
+        "SMARTINVENTORY",
+        margin,
+        11,
+      );
+
+      pdf.setTextColor(255, 255, 255);
+      pdf.setFontSize(20);
+      pdf.text(
+        "Reporte de auditoria visual",
+        margin,
+        22,
+      );
+
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(8.5);
+      pdf.setTextColor(203, 213, 225);
+      pdf.text(
+        `Reporte ${scan.id}`,
+        margin,
+        28,
+      );
+
+      cursorY = 40;
+
+      const columnGap = 3;
+      const columnWidth =
+        (contentWidth - columnGap) / 2;
+
+      drawLabelValue(
+        "Fecha",
+        scan.fecha,
+        margin,
+        cursorY,
+        columnWidth,
+      );
+      drawLabelValue(
+        "Estado",
+        analysisStatus,
+        margin + columnWidth + columnGap,
+        cursorY,
+        columnWidth,
+      );
+
+      cursorY += 20;
+
+      drawLabelValue(
+        "Modelo",
+        "YOLO11n",
+        margin,
+        cursorY,
+        columnWidth,
+      );
+      drawLabelValue(
+        "Tiempo de inferencia",
+        typeof scan.inferenceTimeMs ===
+        "number"
+          ? `${scan.inferenceTimeMs.toFixed(
+              0,
+            )} ms`
+          : "N/D",
+        margin + columnWidth + columnGap,
+        cursorY,
+        columnWidth,
+      );
+
+      cursorY += 20;
+
+      drawLabelValue(
+        "Detecciones IA",
+        String(totalAiDetected),
+        margin,
+        cursorY,
+        columnWidth,
+      );
+      drawLabelValue(
+        "Conteo final",
+        String(totalCorrected),
+        margin + columnWidth + columnGap,
+        cursorY,
+        columnWidth,
+      );
+
+      cursorY += 23;
+
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(12);
+      pdf.setTextColor(15, 23, 42);
+      pdf.text(
+        "Imagen analizada",
+        margin,
+        cursorY,
+      );
+      cursorY += 5;
+
+      try {
+        const annotatedImage =
+          await createAnnotatedImage(
+            imageSrc,
+            predictions,
+          );
+
+        const maximumImageHeight = 87;
+        const imageRatio =
+          annotatedImage.width /
+          annotatedImage.height;
+
+        let pdfImageWidth = contentWidth;
+        let pdfImageHeight =
+          pdfImageWidth / imageRatio;
+
+        if (
+          pdfImageHeight >
+          maximumImageHeight
+        ) {
+          pdfImageHeight =
+            maximumImageHeight;
+          pdfImageWidth =
+            pdfImageHeight * imageRatio;
+        }
+
+        ensureSpace(pdfImageHeight + 8);
+
+        const imageX =
+          margin +
+          (contentWidth - pdfImageWidth) / 2;
+
+        pdf.setDrawColor(203, 213, 225);
+        pdf.rect(
+          imageX - 0.5,
+          cursorY - 0.5,
+          pdfImageWidth + 1,
+          pdfImageHeight + 1,
+        );
+
+        pdf.addImage(
+          annotatedImage.dataUrl,
+          "JPEG",
+          imageX,
+          cursorY,
+          pdfImageWidth,
+          pdfImageHeight,
+          undefined,
+          "FAST",
+        );
+
+        cursorY += pdfImageHeight + 8;
+      } catch {
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(9);
+        pdf.setTextColor(100, 116, 139);
+        pdf.text(
+          "La imagen no pudo incluirse en el PDF, pero los datos del analisis se conservaron.",
+          margin,
+          cursorY + 4,
+          {
+            maxWidth: contentWidth,
+          },
+        );
+        cursorY += 13;
+      }
+
+      ensureSpace(62);
+
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(12);
+      pdf.setTextColor(15, 23, 42);
+      pdf.text(
+        "Inventario por categoria",
+        margin,
+        cursorY,
+      );
+      cursorY += 5;
+
+      const tableColumns = [
+        {
+          title: "Categoria",
+          width: 58,
+        },
+        {
+          title: "Confianza",
+          width: 39,
+        },
+        {
+          title: "Conteo IA",
+          width: 39,
+        },
+        {
+          title: "Conteo final",
+          width:
+            contentWidth - 58 - 39 - 39,
+        },
+      ];
+
+      let columnX = margin;
+
+      pdf.setFillColor(15, 23, 42);
+      pdf.rect(
+        margin,
+        cursorY,
+        contentWidth,
+        9,
+        "F",
+      );
+
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(8);
+      pdf.setTextColor(255, 255, 255);
+
+      for (const column of tableColumns) {
+        pdf.text(
+          column.title,
+          columnX + 2.5,
+          cursorY + 5.8,
+        );
+        columnX += column.width;
+      }
+
+      cursorY += 9;
+
+      ITEM_CATEGORIES.forEach(
+        (category, rowIndex) => {
+          const rowHeight = 9;
+
+          if (rowIndex % 2 === 0) {
+            pdf.setFillColor(
+              248,
+              250,
+              252,
+            );
+          } else {
+            pdf.setFillColor(
+              241,
+              245,
+              249,
+            );
+          }
+
+          pdf.rect(
+            margin,
+            cursorY,
+            contentWidth,
+            rowHeight,
+            "F",
+          );
+
+          const categoryConfidence =
+            getCategoryConfidence(category);
+
+          const values = [
+            category,
+            categoryConfidence === null
+              ? "N/D"
+              : `${categoryConfidence.toFixed(
+                  1,
+                )} %`,
+            String(aiCounts[category]),
+            String(
+              editableCounts[category],
+            ),
+          ];
+
+          pdf.setFont(
+            "helvetica",
+            "normal",
+          );
+          pdf.setFontSize(8.5);
+          pdf.setTextColor(30, 41, 59);
+
+          let valueX = margin;
+
+          values.forEach(
+            (value, valueIndex) => {
+              pdf.text(
+                value,
+                valueX + 2.5,
+                cursorY + 5.8,
+              );
+
+              valueX +=
+                tableColumns[valueIndex]
+                  .width;
+            },
+          );
+
+          cursorY += rowHeight;
+        },
+      );
+
+      cursorY += 8;
+      ensureSpace(30);
+
+      pdf.setFillColor(240, 253, 250);
+      pdf.setDrawColor(94, 234, 212);
+      pdf.roundedRect(
+        margin,
+        cursorY,
+        contentWidth,
+        24,
+        2,
+        2,
+        "FD",
+      );
+
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(8);
+      pdf.setTextColor(13, 148, 136);
+      pdf.text(
+        "RESUMEN DEL ANALISIS",
+        margin + 4,
+        cursorY + 6,
+      );
+
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(9);
+      pdf.setTextColor(30, 41, 59);
+
+      const finalDetails =
+        ITEM_CATEGORIES
+          .filter(
+            (category) =>
+              editableCounts[category] >
+              0,
+          )
+          .map(
+            (category) =>
+              `${editableCounts[category]} ${category}`,
+          )
+          .join(", ") ||
+        "Sin unidades registradas";
+
+      const summaryLines =
+        pdf.splitTextToSize(
+          `Conteo final mostrado: ${finalDetails}. Confianza promedio: ${
+            averageConfidence === null
+              ? "N/D"
+              : `${averageConfidence.toFixed(
+                  1,
+                )} %`
+          }. Umbral minimo: ${confidenceThreshold} %.`,
+          contentWidth - 8,
+        );
+
+      pdf.text(
+        summaryLines,
+        margin + 4,
+        cursorY + 12,
+      );
+
+      const totalPages =
+        pdf.getNumberOfPages();
+
+      for (
+        let pageNumber = 1;
+        pageNumber <= totalPages;
+        pageNumber += 1
+      ) {
+        pdf.setPage(pageNumber);
+        pdf.setDrawColor(226, 232, 240);
+        pdf.line(
+          margin,
+          pageHeight - 11,
+          pageWidth - margin,
+          pageHeight - 11,
+        );
+
+        pdf.setFont(
+          "helvetica",
+          "normal",
+        );
+        pdf.setFontSize(7.5);
+        pdf.setTextColor(
+          100,
+          116,
+          139,
+        );
+        pdf.text(
+          "Generado por SmartInventory",
+          margin,
+          pageHeight - 6,
+        );
+        pdf.text(
+          `Pagina ${pageNumber} de ${totalPages}`,
+          pageWidth - margin,
+          pageHeight - 6,
+          {
+            align: "right",
+          },
+        );
+      }
+
+      const safeReportId =
+        sanitizePdfFileName(scan.id) ||
+        "reporte";
+
+      pdf.save(
+        `reporte-inventario-${safeReportId}.pdf`,
+      );
+    } catch (error) {
+      setPdfError(
+        error instanceof Error
+          ? error.message
+          : "No fue posible generar el reporte PDF.",
+      );
+    } finally {
+      setIsGeneratingPdf(false);
+    }
   };
 
   return (
@@ -472,6 +1159,164 @@ export default function ReportDetail({
           </div>
         </div>
       </div>
+
+      <section
+        className="rounded-2xl border border-slate-800/70 bg-slate-900/55 p-5 shadow-xl backdrop-blur-md"
+        aria-labelledby="analysis-information-title"
+      >
+        <div className="mb-4 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+          <div>
+            <span className="font-mono text-[10px] font-semibold uppercase tracking-widest text-teal-400">
+              HU-14
+            </span>
+
+            <h2
+              id="analysis-information-title"
+              className="mt-1 font-serif text-2xl font-medium text-white"
+            >
+              Información del análisis
+            </h2>
+
+            <p className="mt-1 text-sm text-slate-400">
+              Resumen técnico y cuantitativo del escaneo realizado.
+            </p>
+          </div>
+
+          <span
+            className={`w-fit rounded-full border px-3 py-1.5 font-mono text-[10px] font-semibold uppercase ${
+              isCommitted
+                ? "border-emerald-500/30 bg-emerald-950/40 text-emerald-400"
+                : "border-amber-500/30 bg-amber-950/40 text-amber-400"
+            }`}
+          >
+            {analysisStatus}
+          </span>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <article className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
+            <div className="mb-2 flex items-center gap-2 text-slate-500">
+              <Tag className="h-4 w-4" />
+              <span className="font-mono text-[10px] font-semibold uppercase tracking-wider">
+                Identificador
+              </span>
+            </div>
+
+            <p className="break-all font-mono text-sm font-semibold text-slate-200">
+              {scan.id}
+            </p>
+          </article>
+
+          <article className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
+            <div className="mb-2 flex items-center gap-2 text-slate-500">
+              <ShieldCheck className="h-4 w-4" />
+              <span className="font-mono text-[10px] font-semibold uppercase tracking-wider">
+                Modelo
+              </span>
+            </div>
+
+            <p className="font-mono text-lg font-bold text-teal-400">
+              YOLO11n
+            </p>
+          </article>
+
+          <article className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
+            <div className="mb-2 flex items-center gap-2 text-slate-500">
+              <Clock3 className="h-4 w-4" />
+              <span className="font-mono text-[10px] font-semibold uppercase tracking-wider">
+                Tiempo de inferencia
+              </span>
+            </div>
+
+            <p className="font-mono text-lg font-bold text-cyan-400">
+              {typeof scan.inferenceTimeMs === "number"
+                ? `${scan.inferenceTimeMs.toFixed(0)} ms`
+                : "N/D"}
+            </p>
+          </article>
+
+          <article className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
+            <div className="mb-2 flex items-center gap-2 text-slate-500">
+              <Info className="h-4 w-4" />
+              <span className="font-mono text-[10px] font-semibold uppercase tracking-wider">
+                Umbral mínimo
+              </span>
+            </div>
+
+            <p className="font-mono text-lg font-bold text-slate-200">
+              {confidenceThreshold} %
+            </p>
+          </article>
+
+          <article className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
+            <div className="mb-2 flex items-center gap-2 text-slate-500">
+              <Package className="h-4 w-4" />
+              <span className="font-mono text-[10px] font-semibold uppercase tracking-wider">
+                Detecciones IA
+              </span>
+            </div>
+
+            <p className="font-mono text-2xl font-bold text-slate-200">
+              {totalAiDetected}
+            </p>
+          </article>
+
+          <article className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
+            <div className="mb-2 flex items-center gap-2 text-slate-500">
+              <CheckCircle2 className="h-4 w-4" />
+              <span className="font-mono text-[10px] font-semibold uppercase tracking-wider">
+                Conteo final
+              </span>
+            </div>
+
+            <p className="font-mono text-2xl font-bold text-teal-400">
+              {totalCorrected}
+            </p>
+          </article>
+
+          <article className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
+            <div className="mb-2 flex items-center gap-2 text-slate-500">
+              <Wrench className="h-4 w-4" />
+              <span className="font-mono text-[10px] font-semibold uppercase tracking-wider">
+                Categorías presentes
+              </span>
+            </div>
+
+            <p className="font-mono text-2xl font-bold text-indigo-300">
+              {detectedCategories}
+            </p>
+          </article>
+
+          <article className="rounded-xl border border-slate-800 bg-slate-950/50 p-4">
+            <div className="mb-2 flex items-center gap-2 text-slate-500">
+              <Eye className="h-4 w-4" />
+              <span className="font-mono text-[10px] font-semibold uppercase tracking-wider">
+                Confianza promedio
+              </span>
+            </div>
+
+            <p className="font-mono text-lg font-bold text-cyan-400">
+              {averageConfidence === null
+                ? "N/D"
+                : `${averageConfidence.toFixed(1)} %`}
+            </p>
+          </article>
+        </div>
+
+        <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/35 p-4">
+          <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+            Resumen
+          </span>
+
+          <p className="mt-2 text-sm leading-relaxed text-slate-300">
+            {scan.warehouseSummary}
+          </p>
+
+          <p className="mt-2 font-mono text-[10px] uppercase tracking-wider text-slate-500">
+            Fecha del análisis: {scan.fecha}
+          </p>
+        </div>
+      </section>
 
       <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
         <div className="space-y-4">
@@ -864,6 +1709,15 @@ export default function ReportDetail({
         </div>
       </div>
 
+      {pdfError && (
+        <div
+          role="alert"
+          className="rounded-xl border border-rose-500/30 bg-rose-950/30 px-4 py-3 text-sm text-rose-200"
+        >
+          {pdfError}
+        </div>
+      )}
+
       <div className="mt-8 flex flex-col items-center justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl backdrop-blur-md sm:flex-row">
         <div className="text-center sm:text-left">
           <p className="text-sm font-semibold text-slate-200">
@@ -887,6 +1741,26 @@ export default function ReportDetail({
             id="footer-back-btn"
           >
             Volver al panel
+          </button>
+
+          <button
+            type="button"
+            onClick={handleDownloadPdf}
+            disabled={isGeneratingPdf}
+            className="flex w-full items-center justify-center space-x-2 rounded-xl border border-cyan-500/30 bg-cyan-950/30 px-6 py-3 text-center text-sm font-semibold text-cyan-300 transition-all hover:border-cyan-400/50 hover:bg-cyan-950/50 hover:text-cyan-200 disabled:cursor-wait disabled:opacity-60 sm:w-auto"
+            id="download-pdf-btn"
+          >
+            {isGeneratingPdf ? (
+              <LoaderCircle className="h-4 w-4 animate-spin" />
+            ) : (
+              <Download className="h-4 w-4" />
+            )}
+
+            <span>
+              {isGeneratingPdf
+                ? "Generando PDF..."
+                : "Descargar PDF"}
+            </span>
           </button>
 
           <button
