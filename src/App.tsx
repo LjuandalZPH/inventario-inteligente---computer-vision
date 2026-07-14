@@ -15,7 +15,10 @@ import {
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 
-import type { ScanReport } from "../types/inventory";
+import type {
+  InventoryItem,
+  ScanReport,
+} from "../types/inventory";
 import ReportDetail from "./components/inventory/report-detail";
 import UploadScanModal from "./components/inventory/upload-modal";
 
@@ -31,6 +34,23 @@ type ApiStatus = "checking" | "online" | "offline";
 interface ActiveRoute {
   path: "dashboard" | "report";
   id?: string;
+}
+
+function createValidatedSummary(
+  detections: InventoryItem[],
+): string {
+  if (detections.length === 0) {
+    return "Inventario validado por el usuario sin unidades registradas.";
+  }
+
+  const details = detections
+    .map(
+      ({ item, cantidad }) =>
+        `${cantidad} ${item}`,
+    )
+    .join(", ");
+
+  return `Inventario validado por el usuario. Conteo final: ${details}.`;
 }
 
 export default function App() {
@@ -180,12 +200,35 @@ export default function App() {
     });
   };
 
-  const handleCommitStock = (scanId: string) => {
+  const handleCommitStock = (
+    scanId: string,
+    correctedDetections: InventoryItem[],
+  ) => {
+    const normalizedDetections =
+      correctedDetections
+        .filter(
+          (detection) =>
+            Number.isFinite(detection.cantidad) &&
+            detection.cantidad > 0,
+        )
+        .map((detection) => ({
+          ...detection,
+          cantidad: Math.trunc(
+            detection.cantidad,
+          ),
+        }));
+
     setScans((previousScans) =>
       previousScans.map((scan) =>
         scan.id === scanId
           ? {
               ...scan,
+              detecciones:
+                normalizedDetections,
+              warehouseSummary:
+                createValidatedSummary(
+                  normalizedDetections,
+                ),
               confirmado: true,
             }
           : scan,

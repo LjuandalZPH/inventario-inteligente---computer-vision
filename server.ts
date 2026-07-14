@@ -15,6 +15,7 @@ import multer from "multer";
 import type {
   AllowedItemType,
   InventoryItem,
+  InventoryPrediction,
   ScanReport,
 } from "./types/inventory";
 import type { YoloInferenceResponse } from "./types/yolo";
@@ -289,13 +290,10 @@ async function runInferenceWorker(
 // CONSTRUCCIÓN DEL INVENTARIO
 // ----------------------------------------------------
 
-function groupPredictions(
+function normalizePredictions(
   inferenceResponse: WorkerResponse,
-): InventoryItem[] {
-  const counts = new Map<
-    AllowedItemType,
-    number
-  >();
+): InventoryPrediction[] {
+  const predictions: InventoryPrediction[] = [];
 
   for (const prediction of inferenceResponse.predictions) {
     const category =
@@ -307,9 +305,43 @@ function groupPredictions(
       continue;
     }
 
+    if (
+      !Array.isArray(prediction.box) ||
+      prediction.box.length < 4
+    ) {
+      continue;
+    }
+
+    const [x1, y1, x2, y2] = prediction.box;
+
+    predictions.push({
+      box: [
+        Number(x1),
+        Number(y1),
+        Number(x2),
+        Number(y2),
+      ],
+      score: Number(prediction.score),
+      classId: Number(prediction.classId),
+      className: category,
+    });
+  }
+
+  return predictions;
+}
+
+function groupPredictions(
+  predictions: InventoryPrediction[],
+): InventoryItem[] {
+  const counts = new Map<
+    AllowedItemType,
+    number
+  >();
+
+  for (const prediction of predictions) {
     counts.set(
-      category,
-      (counts.get(category) ?? 0) + 1,
+      prediction.className,
+      (counts.get(prediction.className) ?? 0) + 1,
     );
   }
 
@@ -390,9 +422,11 @@ app.post(
         return;
       }
 
-      const detections = groupPredictions(
-        inferenceResponse,
-      );
+      const predicciones =
+        normalizePredictions(inferenceResponse);
+
+      const detecciones =
+        groupPredictions(predicciones);
 
       const base64Image =
         request.file.buffer.toString("base64");
@@ -406,9 +440,10 @@ app.post(
           .toISOString()
           .split("T")[0],
         urlImagen: imageDataUrl,
-        detecciones: detections,
+        detecciones,
+        predicciones,
         warehouseSummary:
-          createWarehouseSummary(detections),
+          createWarehouseSummary(detecciones),
         confirmado: false,
       };
 
