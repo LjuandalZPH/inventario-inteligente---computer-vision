@@ -1,392 +1,602 @@
-import React, { useState, useMemo } from "react";
-import { 
-  Plus, 
-  Cpu, 
-  Layers, 
-  Activity, 
-  AlertTriangle, 
-  Calendar, 
-  ArrowRight, 
-  Search, 
-  Package, 
-  ShieldCheck, 
-  Sparkles,
+import { useEffect, useMemo, useState } from "react";
+import {
+  Activity,
+  AlertTriangle,
+  ArrowRight,
+  ArrowUpRight,
+  Calendar,
   CheckCircle,
   Database,
-  ArrowUpRight
+  Layers,
+  Package,
+  Plus,
+  Search,
+  Sparkles,
 } from "lucide-react";
-import { motion, AnimatePresence } from "motion/react";
-import { MOCK_SCANS, InventoryScan } from "./types/inventory";
-import UploadScanModal from "./components/inventory/upload-modal";
-import ReportDetail from "./components/inventory/report-detail";
+import { AnimatePresence, motion } from "motion/react";
 
-// Import our beautiful custom generated image
-import mockWarehouseImg from "./assets/images/mock_warehouse_1783951947353.jpg";
+import type { ScanReport } from "../types/inventory";
+import ReportDetail from "./components/inventory/report-detail";
+import UploadScanModal from "./components/inventory/upload-modal";
+
+interface ApiHealthResponse {
+  status: "ok";
+  service: string;
+  model: string;
+  configured: boolean;
+}
+
+type ApiStatus = "checking" | "online" | "offline";
+
+interface ActiveRoute {
+  path: "dashboard" | "report";
+  id?: string;
+}
 
 export default function App() {
-  const [scans, setScans] = useState<InventoryScan[]>(() => {
-    if (typeof window !== "undefined") {
-      const saved = localStorage.getItem("smartinventory_scans");
-      if (saved) {
-        try {
-          return JSON.parse(saved);
-        } catch (e) {
-          console.error("Failed to load scans from localStorage:", e);
-        }
-      }
-    }
-    return MOCK_SCANS;
-  });
-  
-  const [activeRoute, setActiveRoute] = useState<{ path: "dashboard" | "report"; id?: string }>({
-    path: "dashboard"
-  });
-  const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
+  const [scans, setScans] = useState<ScanReport[]>([]);
+  const [activeRoute, setActiveRoute] =
+    useState<ActiveRoute>({
+      path: "dashboard",
+    });
+  const [isUploadModalOpen, setIsUploadModalOpen] =
+    useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  
-  const [committedScans, setCommittedScans] = useState<Set<string>>(() => {
-    if (typeof window !== "undefined") {
-      const saved = localStorage.getItem("smartinventory_committed");
-      if (saved) {
-        try {
-          return new Set(JSON.parse(saved));
-        } catch (e) {
-          console.error("Failed to load committed scans from localStorage:", e);
+  const [apiStatus, setApiStatus] =
+    useState<ApiStatus>("checking");
+  const [modelConfigured, setModelConfigured] =
+    useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    const checkApiHealth = async () => {
+      try {
+        const response = await fetch("/api/health", {
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(
+            `La API respondió con el código ${response.status}.`,
+          );
         }
+
+        const data =
+          (await response.json()) as ApiHealthResponse;
+
+        setApiStatus("online");
+        setModelConfigured(data.configured);
+      } catch (error: unknown) {
+        if (
+          error instanceof DOMException &&
+          error.name === "AbortError"
+        ) {
+          return;
+        }
+
+        console.error(
+          "No fue posible consultar el estado de la API:",
+          error,
+        );
+
+        setApiStatus("offline");
+        setModelConfigured(false);
       }
-    }
-    return new Set(["scan-001"]);
-  });
+    };
 
-  // Synchronize scans list with localStorage
-  React.useEffect(() => {
-    localStorage.setItem("smartinventory_scans", JSON.stringify(scans));
-  }, [scans]);
+    void checkApiHealth();
 
-  // Synchronize committed scans set with localStorage
-  React.useEffect(() => {
-    localStorage.setItem("smartinventory_committed", JSON.stringify(Array.from(committedScans)));
-  }, [committedScans]);
+    return () => {
+      controller.abort();
+    };
+  }, []);
 
-  // Filter scans chronologically (newest first)
   const filteredScans = useMemo(() => {
-    return scans.filter(scan => {
-      const matchQuery = scan.id.toLowerCase().includes(searchQuery.toLowerCase()) || 
-                         scan.warehouseSummary.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                         scan.detecciones.some(d => d.item.toLowerCase().includes(searchQuery.toLowerCase()));
-      return matchQuery;
+    const normalizedQuery = searchQuery
+      .trim()
+      .toLowerCase();
+
+    if (!normalizedQuery) {
+      return scans;
+    }
+
+    return scans.filter((scan) => {
+      const matchesId = scan.id
+        .toLowerCase()
+        .includes(normalizedQuery);
+
+      const matchesSummary =
+        scan.warehouseSummary
+          .toLowerCase()
+          .includes(normalizedQuery);
+
+      const matchesItem = scan.detecciones.some(
+        (detection) =>
+          detection.item.includes(normalizedQuery),
+      );
+
+      return matchesId || matchesSummary || matchesItem;
     });
   }, [scans, searchQuery]);
 
-  // Calculate high-fidelity real-time metrics
   const totalItemsStored = useMemo(() => {
-    // Only sum committed scans to simulate stock commit workflow
-    let total = 0;
-    scans.forEach(scan => {
-      if (committedScans.has(scan.id)) {
-        total += scan.detecciones.reduce((acc, curr) => acc + curr.cantidad, 0);
-      }
-    });
-    return total;
-  }, [scans, committedScans]);
+    return scans
+      .filter((scan) => scan.confirmado)
+      .reduce((scanTotal, scan) => {
+        const reportTotal = scan.detecciones.reduce(
+          (itemTotal, detection) =>
+            itemTotal + detection.cantidad,
+          0,
+        );
+
+        return scanTotal + reportTotal;
+      }, 0);
+  }, [scans]);
 
   const activeAlertsCount = useMemo(() => {
-    // Alert triggers if a scan has > 25 "cajas" (heavy stack warning) or high density
-    let alerts = 0;
-    scans.forEach(scan => {
-      const cajasCount = scan.detecciones.find(d => d.item.toLowerCase() === "cajas")?.cantidad || 0;
-      if (cajasCount > 25) {
-        alerts += 1;
-      }
-    });
-    return alerts;
+    return scans.reduce((alertCount, scan) => {
+      const boxesDetected =
+        scan.detecciones.find(
+          (detection) => detection.item === "cajas",
+        )?.cantidad ?? 0;
+
+      return boxesDetected > 25
+        ? alertCount + 1
+        : alertCount;
+    }, 0);
   }, [scans]);
 
   const activeScan = useMemo(() => {
-    if (activeRoute.path === "report" && activeRoute.id) {
-      return scans.find(s => s.id === activeRoute.id) || scans[0];
+    if (
+      activeRoute.path !== "report" ||
+      !activeRoute.id
+    ) {
+      return null;
     }
-    return null;
+
+    return (
+      scans.find(
+        (scan) => scan.id === activeRoute.id,
+      ) ?? null
+    );
   }, [activeRoute, scans]);
 
-  const handleScanCreated = (newScan: InventoryScan) => {
-    setScans(prev => [newScan, ...prev]);
+  const handleScanCreated = (
+    newScan: ScanReport,
+  ) => {
+    setScans((previousScans) => [
+      newScan,
+      ...previousScans.filter(
+        (scan) => scan.id !== newScan.id,
+      ),
+    ]);
+
     setIsUploadModalOpen(false);
-    // Automatically transition route to details view for the new scan
-    setActiveRoute({ path: "report", id: newScan.id });
+
+    setActiveRoute({
+      path: "report",
+      id: newScan.id,
+    });
   };
 
-  const handleCommitStock = async (scanId: string) => {
-    const scanToCommit = scans.find(s => s.id === scanId);
-    if (!scanToCommit) return;
-
-    // Vuelve a la lógica original: solo actualiza el estado en el frontend.
-    setCommittedScans(prev => new Set(prev).add(scanId));
+  const handleCommitStock = (scanId: string) => {
+    setScans((previousScans) =>
+      previousScans.map((scan) =>
+        scan.id === scanId
+          ? {
+              ...scan,
+              confirmado: true,
+            }
+          : scan,
+      ),
+    );
   };
+
+  const apiStatusLabel = (() => {
+    if (apiStatus === "checking") {
+      return "VERIFICANDO API";
+    }
+
+    if (apiStatus === "offline") {
+      return "API DESCONECTADA";
+    }
+
+    return "API CONECTADA";
+  })();
+
+  const apiStatusColor = (() => {
+    if (apiStatus === "checking") {
+      return "bg-amber-400";
+    }
+
+    if (apiStatus === "offline") {
+      return "bg-red-500";
+    }
+
+    return "bg-emerald-500";
+  })();
 
   return (
-    <div className="min-h-screen bg-[#020617] text-slate-100 font-sans relative overflow-x-hidden antialiased selection:bg-teal-500/30 selection:text-teal-200">
-      
-      {/* Premium Glassmorphism Background Glow Textures */}
-      <div className="absolute top-0 left-1/4 w-[500px] h-[500px] rounded-full bg-teal-500/5 blur-[120px] pointer-events-none" />
-      <div className="absolute bottom-10 right-1/4 w-[600px] h-[600px] rounded-full bg-sky-500/5 blur-[150px] pointer-events-none" />
-      
-      {/* Decorative Technical Grid Overlay */}
-      <div className="absolute inset-0 bg-[linear-gradient(to_right,#1e293b_1px,transparent_1px),linear-gradient(to_bottom,#1e293b_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_0%,#000_70%,transparent_100%)] opacity-20 pointer-events-none" />
+    <div className="relative min-h-screen overflow-x-hidden bg-[#020617] font-sans text-slate-100 antialiased selection:bg-teal-500/30 selection:text-teal-200">
+      <div className="pointer-events-none absolute left-1/4 top-0 h-[500px] w-[500px] rounded-full bg-teal-500/5 blur-[120px]" />
+      <div className="pointer-events-none absolute bottom-10 right-1/4 h-[600px] w-[600px] rounded-full bg-sky-500/5 blur-[150px]" />
 
-      {/* Main Container */}
-      <div className="relative flex flex-col min-h-screen">
-        
-        {/* Navigation Bar */}
-        <nav className="h-16 flex items-center justify-between px-4 md:px-8 border-b border-slate-800 bg-slate-950/50 sticky top-0 z-40 backdrop-blur-md">
+      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_right,#1e293b_1px,transparent_1px),linear-gradient(to_bottom,#1e293b_1px,transparent_1px)] bg-[size:4rem_4rem] opacity-20 [mask-image:radial-gradient(ellipse_60%_50%_at_50%_0%,#000_70%,transparent_100%)]" />
+
+      <div className="relative flex min-h-screen flex-col">
+        <nav className="sticky top-0 z-40 flex h-16 items-center justify-between border-b border-slate-800 bg-slate-950/50 px-4 backdrop-blur-md md:px-8">
           <div className="flex items-center gap-6">
-            <div 
-              onClick={() => setActiveRoute({ path: "dashboard" })}
-              className="flex items-center space-x-3 cursor-pointer group"
+            <button
+              type="button"
+              onClick={() =>
+                setActiveRoute({
+                  path: "dashboard",
+                })
+              }
+              className="group flex items-center space-x-3 text-left"
               id="app-branding"
             >
-              <div className="w-8 h-8 bg-cyan-600 rounded flex items-center justify-center flex-shrink-0 transition-transform duration-300 group-hover:scale-105">
-                <div className="w-4 h-4 border-2 border-white"></div>
+              <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded bg-cyan-600 transition-transform duration-300 group-hover:scale-105">
+                <div className="h-4 w-4 border-2 border-white" />
               </div>
+
               <div>
-                <span className="font-serif text-xl font-bold tracking-tight text-slate-100 block">SmartInventory</span>
-                <span className="font-mono text-[9px] uppercase tracking-widest text-slate-500 block">YOLOv8 Vision Core</span>
+                <span className="block font-serif text-xl font-bold tracking-tight text-slate-100">
+                  SmartInventory
+                </span>
+
+                <span className="block font-mono text-[9px] uppercase tracking-widest text-slate-500">
+                  YOLO11n Vision Core
+                </span>
               </div>
-            </div>
-
-            {/* Custom geometric navigation links */}
-            <div className="hidden md:flex items-center gap-6 text-xs font-semibold uppercase tracking-wider text-slate-400">
-              <span 
-                onClick={() => setActiveRoute({ path: "dashboard" })}
-                className={`cursor-pointer transition-colors hover:text-slate-100 py-5 border-b-2 ${activeRoute.path === "dashboard" ? "text-cyan-400 border-cyan-400" : "border-transparent"}`}
-              >
-                Dashboard
-              </span>
-              <span className="cursor-not-allowed opacity-40 hover:text-slate-300 transition-colors">Inventory</span>
-              <span className="cursor-not-allowed opacity-40 hover:text-slate-300 transition-colors">Audit Reports</span>
-              <span className="cursor-not-allowed opacity-40 hover:text-slate-300 transition-colors">Settings</span>
-            </div>
-          </div>
-
-          <div className="flex items-center space-x-4">
-            <button
-              onClick={() => setIsUploadModalOpen(true)}
-              className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold uppercase tracking-widest rounded-lg transition-colors shadow-lg shadow-cyan-950 flex items-center space-x-1"
-              id="new-scan-trigger-btn"
-            >
-              <Plus className="h-4 w-4" />
-              <span>[+] New Visual Scan</span>
             </button>
-            <div className="w-8 h-8 rounded-full bg-slate-850 border border-slate-700/60 hidden sm:block"></div>
+
+            <div className="hidden items-center gap-6 text-xs font-semibold uppercase tracking-wider text-slate-400 md:flex">
+              <button
+                type="button"
+                onClick={() =>
+                  setActiveRoute({
+                    path: "dashboard",
+                  })
+                }
+                className={`border-b-2 py-5 transition-colors hover:text-slate-100 ${
+                  activeRoute.path === "dashboard"
+                    ? "border-cyan-400 text-cyan-400"
+                    : "border-transparent"
+                }`}
+              >
+                Panel
+              </button>
+
+              <span className="cursor-not-allowed opacity-40">
+                Inventario
+              </span>
+
+              <span className="cursor-not-allowed opacity-40">
+                Reportes
+              </span>
+
+              <span className="cursor-not-allowed opacity-40">
+                Configuración
+              </span>
+            </div>
           </div>
+
+          <button
+            type="button"
+            onClick={() =>
+              setIsUploadModalOpen(true)
+            }
+            className="flex items-center space-x-1 rounded-lg bg-cyan-600 px-4 py-2 text-xs font-bold uppercase tracking-widest text-white shadow-lg shadow-cyan-950 transition-colors hover:bg-cyan-500"
+            id="new-scan-trigger-btn"
+          >
+            <Plus className="h-4 w-4" />
+            <span>Nuevo escaneo</span>
+          </button>
         </nav>
 
-        {/* View Switcher Container */}
-        <main className="flex-grow py-8 px-4 md:px-8">
+        <main className="flex-grow px-4 py-8 md:px-8">
           <AnimatePresence mode="wait">
             {activeRoute.path === "dashboard" ? (
               <motion.div
                 key="dashboard-view"
-                initial={{ opacity: 0, y: 15 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -15 }}
-                transition={{ duration: 0.3 }}
-                className="space-y-8 max-w-7xl mx-auto"
+                initial={{
+                  opacity: 0,
+                  y: 15,
+                }}
+                animate={{
+                  opacity: 1,
+                  y: 0,
+                }}
+                exit={{
+                  opacity: 0,
+                  y: -15,
+                }}
+                transition={{
+                  duration: 0.3,
+                }}
+                className="mx-auto max-w-7xl space-y-8"
                 id="dashboard-container"
               >
-                {/* Hero / Header greeting info */}
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
                   <div>
                     <h2 className="font-serif text-3xl font-medium tracking-tight text-white">
-                      Panel de Monitoreo
+                      Panel de monitoreo
                     </h2>
+
                     <p className="text-sm text-slate-400">
-                      Gestione y supervise existencias físicas en tiempo real mediante análisis fotográfico con Inteligencia Artificial.
+                      Cargue fotografías y consulte los
+                      inventarios obtenidos mediante visión por
+                      computador.
                     </p>
                   </div>
-                  
-                  {/* Search query box */}
+
                   <div className="relative w-full md:w-80">
-                    <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
+                    <Search className="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
+
                     <input
                       type="text"
-                      placeholder="Buscar por item, ID o resumen..."
+                      placeholder="Buscar por objeto, ID o resumen..."
                       value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-sm placeholder-slate-500 focus:outline-none focus:border-teal-500 focus:ring-1 focus:ring-teal-500 transition-colors"
+                      onChange={(event) =>
+                        setSearchQuery(
+                          event.target.value,
+                        )
+                      }
+                      className="w-full rounded-xl border border-slate-800 bg-slate-950 py-2.5 pl-10 pr-4 text-sm placeholder-slate-500 transition-colors focus:border-teal-500 focus:outline-none focus:ring-1 focus:ring-teal-500"
                       id="search-scans-input"
                     />
                   </div>
                 </div>
 
-                {/* Top Section: 3-Column Metric Grid */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6" id="metrics-grid">
-                  
-                  {/* Metric 1: Total Items Stored */}
-                  <div className="glass p-6 rounded-xl flex flex-col justify-between teal-glow relative overflow-hidden transition-all duration-300 hover:scale-[1.01]">
-                    <div className="absolute top-0 right-0 w-24 h-24 bg-teal-500/5 rounded-full blur-2xl pointer-events-none" />
-                    <div className="flex items-center justify-between mb-4">
-                      <div className="rounded-xl bg-teal-950 p-2.5 text-teal-400 border border-teal-500/20">
+                <div
+                  className="grid grid-cols-1 gap-6 md:grid-cols-3"
+                  id="metrics-grid"
+                >
+                  <div className="glass teal-glow relative flex flex-col justify-between overflow-hidden rounded-xl p-6 transition-all duration-300 hover:scale-[1.01]">
+                    <div className="pointer-events-none absolute right-0 top-0 h-24 w-24 rounded-full bg-teal-500/5 blur-2xl" />
+
+                    <div className="mb-4 flex items-center justify-between">
+                      <div className="rounded-xl border border-teal-500/20 bg-teal-950 p-2.5 text-teal-400">
                         <Package className="h-6 w-6" />
                       </div>
-                      <span className="font-mono text-[10px] uppercase text-teal-500 font-bold bg-teal-950/40 px-2 py-0.5 rounded border border-teal-500/20">
-                        STOCK ACTIVO
+
+                      <span className="rounded border border-teal-500/20 bg-teal-950/40 px-2 py-0.5 font-mono text-[10px] font-bold uppercase text-teal-500">
+                        Inventario confirmado
                       </span>
                     </div>
-                    <span className="font-mono text-[11px] text-slate-400 block uppercase tracking-widest font-semibold">Total Items Stored</span>
-                    <div className="flex items-baseline space-x-2 mt-1">
-                      <span className="text-4xl font-extrabold font-sans text-white tracking-tight">
+
+                    <span className="block font-mono text-[11px] font-semibold uppercase tracking-widest text-slate-400">
+                      Total de objetos
+                    </span>
+
+                    <div className="mt-1 flex items-baseline space-x-2">
+                      <span className="font-sans text-4xl font-extrabold tracking-tight text-white">
                         {totalItemsStored.toLocaleString()}
                       </span>
-                      <span className="text-xs text-emerald-400 font-medium flex items-center">
-                        <ArrowUpRight className="h-3 w-3 mr-0.5" />
-                        Committed
+
+                      <span className="flex items-center text-xs font-medium text-emerald-400">
+                        <ArrowUpRight className="mr-0.5 h-3 w-3" />
+                        Validados
                       </span>
                     </div>
-                    <p className="text-[11px] text-slate-500 mt-2 font-mono">
-                      Sumatoria de auditorías validadas y comprometidas
+
+                    <p className="mt-2 font-mono text-[11px] text-slate-500">
+                      Sumatoria de los reportes confirmados
                     </p>
                   </div>
 
-                  {/* Metric 2: Scans Completed */}
-                  <div className="glass p-6 rounded-xl flex flex-col justify-between relative overflow-hidden transition-all duration-300 hover:scale-[1.01]">
-                    <div className="absolute top-0 right-0 w-24 h-24 bg-sky-500/5 rounded-full blur-2xl pointer-events-none" />
-                    <div className="flex items-center justify-between mb-4">
-                      <div className="rounded-xl bg-sky-950 p-2.5 text-sky-400 border border-sky-500/20">
+                  <div className="glass relative flex flex-col justify-between overflow-hidden rounded-xl p-6 transition-all duration-300 hover:scale-[1.01]">
+                    <div className="pointer-events-none absolute right-0 top-0 h-24 w-24 rounded-full bg-sky-500/5 blur-2xl" />
+
+                    <div className="mb-4 flex items-center justify-between">
+                      <div className="rounded-xl border border-sky-500/20 bg-sky-950 p-2.5 text-sky-400">
                         <Layers className="h-6 w-6" />
                       </div>
-                      <span className="font-mono text-[10px] uppercase text-sky-500 font-bold bg-sky-950/40 px-2 py-0.5 rounded border border-sky-500/20">
-                        TOTAL SCANS
+
+                      <span className="rounded border border-sky-500/20 bg-sky-950/40 px-2 py-0.5 font-mono text-[10px] font-bold uppercase text-sky-500">
+                        Escaneos
                       </span>
                     </div>
-                    <span className="font-mono text-[11px] text-slate-400 block uppercase tracking-widest font-semibold">Scans Completed</span>
-                    <div className="flex items-baseline space-x-2 mt-1">
-                      <span className="text-4xl font-extrabold font-sans text-white tracking-tight">
+
+                    <span className="block font-mono text-[11px] font-semibold uppercase tracking-widest text-slate-400">
+                      Análisis completados
+                    </span>
+
+                    <div className="mt-1 flex items-baseline space-x-2">
+                      <span className="font-sans text-4xl font-extrabold tracking-tight text-white">
                         {scans.length}
                       </span>
-                      <span className="text-xs text-slate-400 font-mono">histórico</span>
+
+                      <span className="font-mono text-xs text-slate-400">
+                        sesión actual
+                      </span>
                     </div>
-                    <p className="text-[11px] text-slate-500 mt-2 font-mono">
-                      Auditorías por detección YOLOv8 registradas
+
+                    <p className="mt-2 font-mono text-[11px] text-slate-500">
+                      Auditorías procesadas con YOLO11n
                     </p>
                   </div>
 
-                  {/* Metric 3: Active Alerts */}
-                  <div className="glass p-6 rounded-xl flex flex-col justify-between relative overflow-hidden transition-all duration-300 hover:scale-[1.01]">
-                    <div className="absolute top-0 right-0 w-24 h-24 bg-amber-500/5 rounded-full blur-2xl pointer-events-none" />
-                    <div className="flex items-center justify-between mb-4">
-                      <div className="rounded-xl bg-amber-950 p-2.5 text-amber-400 border border-amber-500/20">
-                        <AlertTriangle className="h-6 w-6 animate-pulse" />
+                  <div className="glass relative flex flex-col justify-between overflow-hidden rounded-xl p-6 transition-all duration-300 hover:scale-[1.01]">
+                    <div className="pointer-events-none absolute right-0 top-0 h-24 w-24 rounded-full bg-amber-500/5 blur-2xl" />
+
+                    <div className="mb-4 flex items-center justify-between">
+                      <div className="rounded-xl border border-amber-500/20 bg-amber-950 p-2.5 text-amber-400">
+                        <AlertTriangle className="h-6 w-6" />
                       </div>
-                      <span className="font-mono text-[10px] uppercase text-amber-500 font-bold bg-amber-950/40 px-2 py-0.5 rounded border border-amber-500/20">
-                        ALERTA DE SEGURIDAD
+
+                      <span className="rounded border border-amber-500/20 bg-amber-950/40 px-2 py-0.5 font-mono text-[10px] font-bold uppercase text-amber-500">
+                        Densidad
                       </span>
                     </div>
-                    <span className="font-mono text-[11px] text-slate-400 block uppercase tracking-widest font-semibold">Active Alerts</span>
-                    <div className="flex items-baseline space-x-2 mt-1">
-                      <span className="text-4xl font-extrabold font-sans text-amber-400 tracking-tight">
-                        {activeAlertsCount.toString().padStart(2, '0')}
+
+                    <span className="block font-mono text-[11px] font-semibold uppercase tracking-widest text-slate-400">
+                      Alertas activas
+                    </span>
+
+                    <div className="mt-1 flex items-baseline space-x-2">
+                      <span className="font-sans text-4xl font-extrabold tracking-tight text-amber-400">
+                        {activeAlertsCount
+                          .toString()
+                          .padStart(2, "0")}
                       </span>
-                      <span className="text-xs text-amber-500 font-medium bg-amber-950/30 px-2 py-0.5 rounded-full">
-                        Alta Densidad
+
+                      <span className="rounded-full bg-amber-950/30 px-2 py-0.5 text-xs font-medium text-amber-500">
+                        Más de 25 cajas
                       </span>
                     </div>
-                    <p className="text-[11px] text-slate-500 mt-2 font-mono">
-                      Estanterías zona norte superan límite recomendado (&gt;25)
+
+                    <p className="mt-2 font-mono text-[11px] text-slate-500">
+                      Aviso informativo para conteos elevados
                     </p>
                   </div>
-
                 </div>
 
-                {/* Center Section: Chronological Data Table listing past audits */}
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center space-x-2">
                       <Activity className="h-4.5 w-4.5 text-teal-400" />
-                      <span className="font-mono text-xs uppercase tracking-widest text-slate-400 font-bold">Bitácora de Auditorías Visuales</span>
+
+                      <span className="font-mono text-xs font-bold uppercase tracking-widest text-slate-400">
+                        Bitácora de auditorías visuales
+                      </span>
                     </div>
-                    <span className="text-xs text-slate-500 font-mono">Mostrando {filteredScans.length} registros</span>
+
+                    <span className="font-mono text-xs text-slate-500">
+                      {filteredScans.length} registros
+                    </span>
                   </div>
 
-                  <div className="glass rounded-2xl overflow-hidden flex flex-col teal-glow">
-                    <table className="w-full text-left border-collapse" id="audits-log-table">
+                  <div className="glass teal-glow flex flex-col overflow-x-auto rounded-2xl">
+                    <table
+                      className="w-full min-w-[900px] border-collapse text-left"
+                      id="audits-log-table"
+                    >
                       <thead>
-                        <tr className="border-b border-slate-850 bg-slate-900/40 font-mono text-xs text-slate-400">
-                          <th className="py-4 px-6 font-semibold uppercase">ID Auditoría</th>
-                          <th className="py-4 px-6 font-semibold uppercase">Fecha</th>
-                          <th className="py-4 px-6 font-semibold uppercase">Conteo de Objetos</th>
-                          <th className="py-4 px-6 font-semibold uppercase">Estado Inventario</th>
-                          <th className="py-4 px-6 font-semibold uppercase">Resumen de Escaneo</th>
-                          <th className="py-4 px-6 font-semibold text-right uppercase">Análisis</th>
+                        <tr className="border-b border-slate-800 bg-slate-900/40 font-mono text-xs text-slate-400">
+                          <th className="px-6 py-4 font-semibold uppercase">
+                            ID
+                          </th>
+
+                          <th className="px-6 py-4 font-semibold uppercase">
+                            Fecha
+                          </th>
+
+                          <th className="px-6 py-4 font-semibold uppercase">
+                            Objetos
+                          </th>
+
+                          <th className="px-6 py-4 font-semibold uppercase">
+                            Estado
+                          </th>
+
+                          <th className="px-6 py-4 font-semibold uppercase">
+                            Resumen
+                          </th>
+
+                          <th className="px-6 py-4 text-right font-semibold uppercase">
+                            Detalle
+                          </th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-slate-850/60 text-sm">
-                        {filteredScans.length > 0 ? (
-                          filteredScans.map((scan) => {
-                            const isCommitted = committedScans.has(scan.id);
 
-                            return (
-                              <tr 
-                                key={scan.id}
-                                onClick={() => setActiveRoute({ path: "report", id: scan.id })}
-                                className="hover:bg-slate-800/20 transition-colors cursor-pointer group"
-                              >
-                                <td className="py-5 px-6 font-mono font-bold text-white group-hover:text-teal-400 transition-colors">
-                                  {scan.id}
-                                </td>
-                                <td className="py-5 px-6 text-slate-300 font-mono text-xs">
-                                  <div className="flex items-center space-x-1.5">
-                                    <Calendar className="h-3.5 w-3.5 text-slate-500" />
-                                    <span>{scan.fecha}</span>
-                                  </div>
-                                </td>
-                                <td className="py-5 px-6">
-                                  <div className="flex flex-wrap gap-1.5 max-w-[280px]">
-                                    {scan.detecciones.map((d, index) => (
-                                      <span 
-                                        key={index} 
-                                        className="font-mono text-[10px] bg-slate-950 px-2 py-0.5 rounded border border-slate-850 text-slate-300"
+                      <tbody className="divide-y divide-slate-800/60 text-sm">
+                        {filteredScans.length > 0 ? (
+                          filteredScans.map((scan) => (
+                            <tr
+                              key={scan.id}
+                              onClick={() =>
+                                setActiveRoute({
+                                  path: "report",
+                                  id: scan.id,
+                                })
+                              }
+                              className="group cursor-pointer transition-colors hover:bg-slate-800/20"
+                            >
+                              <td className="px-6 py-5 font-mono font-bold text-white transition-colors group-hover:text-teal-400">
+                                {scan.id}
+                              </td>
+
+                              <td className="px-6 py-5 font-mono text-xs text-slate-300">
+                                <div className="flex items-center space-x-1.5">
+                                  <Calendar className="h-3.5 w-3.5 text-slate-500" />
+                                  <span>{scan.fecha}</span>
+                                </div>
+                              </td>
+
+                              <td className="px-6 py-5">
+                                <div className="flex max-w-[280px] flex-wrap gap-1.5">
+                                  {scan.detecciones.map(
+                                    (detection) => (
+                                      <span
+                                        key={detection.item}
+                                        className="rounded border border-slate-800 bg-slate-950 px-2 py-0.5 font-mono text-[10px] text-slate-300"
                                       >
-                                        {d.cantidad} <span className="text-slate-500">{d.item}</span>
+                                        {detection.cantidad}{" "}
+                                        <span className="text-slate-500">
+                                          {detection.item}
+                                        </span>
                                       </span>
-                                    ))}
-                                  </div>
-                                </td>
-                                <td className="py-5 px-6">
-                                  {isCommitted ? (
-                                    <span className="inline-flex items-center space-x-1 font-mono text-[10px] font-semibold text-teal-400 bg-teal-500/10 px-2.5 py-1 rounded border border-teal-500/20">
-                                      <CheckCircle className="h-3 w-3" />
-                                      <span>COMPROMETIDO</span>
-                                    </span>
-                                  ) : (
-                                    <span className="inline-flex items-center space-x-1 font-mono text-[10px] font-semibold text-amber-400 bg-amber-950/40 px-2.5 py-1 rounded-full border border-amber-500/20">
-                                      <Database className="h-3 w-3 animate-pulse" />
-                                      <span>PENDIENTE</span>
+                                    ),
+                                  )}
+
+                                  {scan.detecciones.length ===
+                                    0 && (
+                                    <span className="font-mono text-[10px] text-slate-500">
+                                      Sin detecciones
                                     </span>
                                   )}
-                                </td>
-                                <td className="py-5 px-6 text-slate-400 text-xs max-w-xs truncate font-sans">
-                                  {scan.warehouseSummary}
-                                </td>
-                                <td className="py-5 px-6 text-right">
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setActiveRoute({ path: "report", id: scan.id });
-                                    }}
-                                    className="inline-flex items-center space-x-1.5 text-xs font-mono text-teal-400 hover:text-teal-300 bg-slate-950 px-3 py-1.5 rounded-lg border border-slate-800/80 group-hover:border-teal-500/40 group-hover:bg-slate-900/50 transition-all"
-                                  >
-                                    <span>Ver</span>
-                                    <ArrowRight className="h-3.5 w-3.5 group-hover:translate-x-0.5 transition-transform" />
-                                  </button>
-                                </td>
-                              </tr>
-                            );
-                          })
+                                </div>
+                              </td>
+
+                              <td className="px-6 py-5">
+                                {scan.confirmado ? (
+                                  <span className="inline-flex items-center space-x-1 rounded border border-teal-500/20 bg-teal-500/10 px-2.5 py-1 font-mono text-[10px] font-semibold text-teal-400">
+                                    <CheckCircle className="h-3 w-3" />
+                                    <span>CONFIRMADO</span>
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center space-x-1 rounded-full border border-amber-500/20 bg-amber-950/40 px-2.5 py-1 font-mono text-[10px] font-semibold text-amber-400">
+                                    <Database className="h-3 w-3" />
+                                    <span>PENDIENTE</span>
+                                  </span>
+                                )}
+                              </td>
+
+                              <td className="max-w-xs truncate px-6 py-5 font-sans text-xs text-slate-400">
+                                {scan.warehouseSummary}
+                              </td>
+
+                              <td className="px-6 py-5 text-right">
+                                <button
+                                  type="button"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+
+                                    setActiveRoute({
+                                      path: "report",
+                                      id: scan.id,
+                                    });
+                                  }}
+                                  className="inline-flex items-center space-x-1.5 rounded-lg border border-slate-800/80 bg-slate-950 px-3 py-1.5 font-mono text-xs text-teal-400 transition-all hover:text-teal-300 group-hover:border-teal-500/40 group-hover:bg-slate-900/50"
+                                >
+                                  <span>Ver</span>
+                                  <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
+                                </button>
+                              </td>
+                            </tr>
+                          ))
                         ) : (
                           <tr>
-                            <td colSpan={6} className="py-12 text-center text-slate-500 font-mono text-sm">
-                              No se encontraron registros de auditoría que coincidan con la búsqueda.
+                            <td
+                              colSpan={6}
+                              className="px-6 py-12 text-center font-mono text-sm text-slate-500"
+                            >
+                              {scans.length === 0
+                                ? "Aún no se han realizado escaneos. Cargue una imagen para comenzar."
+                                : "No se encontraron registros que coincidan con la búsqueda."}
                             </td>
                           </tr>
                         )}
@@ -395,23 +605,35 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Additional Quick Onboarding Info Card */}
-                <div className="rounded-2xl border border-slate-800 bg-slate-950/40 p-6 flex flex-col md:flex-row items-center justify-between gap-6 relative overflow-hidden">
-                  <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-teal-500 via-sky-500 to-indigo-500" />
+                <div className="relative flex flex-col items-center justify-between gap-6 overflow-hidden rounded-2xl border border-slate-800 bg-slate-950/40 p-6 md:flex-row">
+                  <div className="absolute left-0 top-0 h-1 w-full bg-gradient-to-r from-teal-500 via-sky-500 to-indigo-500" />
+
                   <div className="space-y-1">
-                    <h4 className="font-serif text-lg font-medium text-white flex items-center space-x-2">
-                      <Sparkles className="h-4.5 w-4.5 text-teal-400 animate-pulse" />
-                      <span>¿Cómo funciona el flujo de SmartInventory?</span>
+                    <h4 className="flex items-center space-x-2 font-serif text-lg font-medium text-white">
+                      <Sparkles className="h-4.5 w-4.5 text-teal-400" />
+                      <span>
+                        ¿Cómo funciona SmartInventory?
+                      </span>
                     </h4>
-                    <p className="text-xs text-slate-400 max-w-2xl leading-relaxed">
-                      El sistema le permite cargar fotos de sus racks, procesarlas con un detector <strong>Ultralytics YOLO</strong> simulado que reconoce mercancía y, tras verificar la precisión de las detecciones, comprometer el conteo al stock central para actualizar las métricas dinámicas de su almacén.
+
+                    <p className="max-w-2xl text-xs leading-relaxed text-slate-400">
+                      El usuario carga una fotografía, el
+                      backend la envía al modelo YOLO11n y la
+                      aplicación presenta el conteo agrupado por
+                      categoría. En esta primera versión se
+                      admiten cajas, botellas, laptops y
+                      herramientas.
                     </p>
                   </div>
+
                   <button
-                    onClick={() => setIsUploadModalOpen(true)}
-                    className="flex-shrink-0 inline-flex items-center space-x-2 rounded-xl bg-slate-900 border border-slate-800 px-5 py-3 text-xs font-semibold text-slate-300 hover:bg-slate-850 hover:text-white hover:border-slate-700 transition-colors"
+                    type="button"
+                    onClick={() =>
+                      setIsUploadModalOpen(true)
+                    }
+                    className="inline-flex flex-shrink-0 items-center space-x-2 rounded-xl border border-slate-800 bg-slate-900 px-5 py-3 text-xs font-semibold text-slate-300 transition-colors hover:border-slate-700 hover:bg-slate-800 hover:text-white"
                   >
-                    <span>Probar Simulador</span>
+                    <span>Realizar escaneo</span>
                     <ArrowRight className="h-4 w-4" />
                   </button>
                 </div>
@@ -419,53 +641,98 @@ export default function App() {
             ) : (
               <motion.div
                 key="report-view"
-                initial={{ opacity: 0, y: 15 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -15 }}
-                transition={{ duration: 0.3 }}
+                initial={{
+                  opacity: 0,
+                  y: 15,
+                }}
+                animate={{
+                  opacity: 1,
+                  y: 0,
+                }}
+                exit={{
+                  opacity: 0,
+                  y: -15,
+                }}
+                transition={{
+                  duration: 0.3,
+                }}
               >
-                {activeScan && (
+                {activeScan ? (
                   <ReportDetail
                     scan={activeScan}
-                    warehouseAssetPath={mockWarehouseImg}
-                    onBackToDashboard={() => setActiveRoute({ path: "dashboard" })}
+                    onBackToDashboard={() =>
+                      setActiveRoute({
+                        path: "dashboard",
+                      })
+                    }
                     onCommitStock={handleCommitStock}
                   />
+                ) : (
+                  <div className="mx-auto max-w-3xl rounded-2xl border border-slate-800 bg-slate-900/20 p-10 text-center">
+                    <p className="text-sm text-slate-400">
+                      El reporte solicitado no está disponible.
+                    </p>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setActiveRoute({
+                          path: "dashboard",
+                        })
+                      }
+                      className="mt-4 rounded-lg bg-cyan-600 px-4 py-2 text-sm font-semibold text-white hover:bg-cyan-500"
+                    >
+                      Volver al panel
+                    </button>
+                  </div>
                 )}
               </motion.div>
             )}
           </AnimatePresence>
         </main>
 
-        {/* Footer Status Bar */}
-        <footer className="h-10 px-8 border-t border-slate-800 bg-slate-950 flex items-center justify-between text-[10px] text-slate-500 uppercase tracking-widest font-mono">
-          <div className="flex gap-6">
+        <footer className="flex min-h-10 items-center justify-between gap-4 border-t border-slate-800 bg-slate-950 px-4 py-2 font-mono text-[10px] uppercase tracking-widest text-slate-500 md:px-8">
+          <div className="flex flex-wrap gap-4 md:gap-6">
             <span className="flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full"></span>
-              SYSTEM: OPTIMAL
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${apiStatusColor} ${
+                  apiStatus === "checking"
+                    ? "animate-pulse"
+                    : ""
+                }`}
+              />
+              {apiStatusLabel}
             </span>
-            <span>LATENCY: 12ms</span>
+
+            <span>
+              MODELO:{" "}
+              {modelConfigured
+                ? "CONFIGURADO"
+                : "PENDIENTE"}
+            </span>
           </div>
-          <div className="flex gap-6">
-            <span>V1.0.4-BETA</span>
-            <span className="text-teal-400 flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 bg-teal-400 rounded-full animate-pulse"></span>
-              MODEL LOADED
+
+          <div className="flex gap-4 md:gap-6">
+            <span>SPRINT 1</span>
+
+            <span className="flex items-center gap-1.5 text-teal-400">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-teal-400" />
+              YOLO11n
             </span>
           </div>
         </footer>
 
-        {/* Dialog Modal for YOLO scan uploads */}
         <AnimatePresence>
           {isUploadModalOpen && (
             <UploadScanModal
               isOpen={isUploadModalOpen}
-              onClose={() => setIsUploadModalOpen(false)}
+              onClose={() =>
+                setIsUploadModalOpen(false)
+              }
               onScanCreated={handleScanCreated}
             />
           )}
         </AnimatePresence>
-
       </div>
     </div>
   );

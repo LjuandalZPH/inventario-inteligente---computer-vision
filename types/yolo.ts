@@ -1,42 +1,65 @@
 /**
  * @file types/yolo.ts
- * @description Contrato estricto de TypeScript que representa el payload JSON nativo
- * generado por nuestro script de inferencia basado en Ultralytics YOLOv8.
+ * @description Define la estructura de los resultados generados
+ * por el servicio de inferencia con Ultralytics YOLO11.
  */
 
 /**
- * Representa una caja de detección individual (Bounding Box) generada por YOLOv8.
+ * Representa un objeto individual detectado por YOLO11.
  */
 export interface YoloPrediction {
   /**
-   * Coordenadas de la caja en formato pixel [x_min, y_min, x_max, y_max].
+   * Coordenadas de la caja delimitadora en píxeles:
+   * [xMin, yMin, xMax, yMax].
    */
   box: [number, number, number, number];
 
   /**
-   * Puntuación de confianza de la predicción (de 0.0 a 1.0).
+   * Nivel de confianza de la detección.
+   * El valor se encuentra entre 0 y 1.
    */
   score: number;
 
   /**
-   * ID numérico de la clase según el dataset (ej. COCO dataset).
+   * Identificador numérico de la clase detectada.
    */
   classId: number;
 
   /**
-   * Etiqueta original en inglés devuelta por el modelo (ej. "bottle", "suitcase").
+   * Nombre de la categoría detectada.
+   *
+   * Para el MVP puede contener:
+   * - cajas
+   * - botellas
+   * - laptops
+   * - herramientas
    */
   className: string;
 }
 
 /**
- * Estructura de la respuesta limpia enviada por el script de Python a Next.js.
+ * Respuesta enviada por el script de Python al backend de Express.
  */
 export interface YoloInferenceResponse {
-  status: 'success' | 'failed';
-  predictions: YoloPrediction[];
   /**
-   * Tiempo que le tomó al modelo correr la inferencia en la CPU/GPU.
+   * Indica si la inferencia terminó correctamente.
+   */
+  status: 'success' | 'failed';
+
+  /**
+   * Lista de objetos identificados en la imagen.
+   * Estará vacía cuando no se detecten objetos o ocurra un error.
+   */
+  predictions: YoloPrediction[];
+
+  /**
+   * Tiempo aproximado empleado en realizar la inferencia,
+   * expresado en milisegundos.
    */
   inferenceTimeMs: number;
+
+  /**
+   * Mensaje descriptivo cuando la inferencia falla.
+   */
+  error?: string;
 }

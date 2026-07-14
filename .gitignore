@@ -1,8 +1,27 @@
+# Dependencias de Node
 node_modules/
-build/
 dist/
-coverage/
+
+# Entorno virtual de Python
+.venv/
+venv/
+
+# Archivos de Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Modelos descargados
+*.pt
+
+# Variables privadas
+.env
+
+# Archivos generados
+outputs/
+uploads/
+
+# Sistema y editor
 .DS_Store
-*.log
-.env*
-!.env.example
+Thumbs.db
+.vscode/

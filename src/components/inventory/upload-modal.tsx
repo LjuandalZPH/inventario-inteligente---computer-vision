@@ -1,179 +1,271 @@
-import React, { useState, useRef } from "react";
-import { X, UploadCloud, Eye, RefreshCw, Cpu, Check, AlertTriangle } from "lucide-react";
-import { motion, AnimatePresence } from "motion/react";
-import { InventoryScan, Detection } from "../../types/inventory";
+import React, { useRef, useState } from "react";
+import {
+  AlertTriangle,
+  Check,
+  Cpu,
+  RefreshCw,
+  UploadCloud,
+  X,
+} from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
+
+import type {
+  ScanErrorResponse,
+  ScanReport,
+  ScanResponse,
+} from "../../../types/inventory";
 
 interface UploadScanModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onScanCreated: (newScan: InventoryScan) => void;
+  onScanCreated: (newScan: ScanReport) => void;
 }
 
-export default function UploadScanModal({ isOpen, onClose, onScanCreated }: UploadScanModalProps) {
+const MAX_FILE_SIZE = 8 * 1024 * 1024;
+
+const ALLOWED_IMAGE_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+]);
+
+export default function UploadScanModal({
+  isOpen,
+  onClose,
+  onScanCreated,
+}: UploadScanModalProps) {
   const [phase, setPhase] = useState<1 | 2 | 3>(1);
-  const [selectedImage, setSelectedImage] = useState<string | null>(null);
-  const [imageName, setImageName] = useState<string>("");
+  const [selectedFile, setSelectedFile] =
+    useState<File | null>(null);
+  const [selectedImage, setSelectedImage] =
+    useState<string | null>(null);
+  const [imageName, setImageName] = useState("");
   const [dragActive, setDragActive] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // A couple of beautiful high-tech preset mock images for a smooth offline-first trial
-  const PRESET_IMAGES = [
-    {
-      name: "almacen_norte_rackB.jpg",
-      url: "https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?auto=format&fit=crop&q=80&w=800",
-      detecciones: [
-        { item: "cajas", cantidad: 45 },
-        { item: "botellas", cantidad: 25 },
-        { item: "laptops", cantidad: 4 },
-        { item: "herramientas", cantidad: 12 }
-      ],
-      summary: "Simulación: Almacén norte con estibas densas de racks industriales de nivel B."
-    },
-    {
-      name: "zona_carga_embarque.jpg",
-      url: "https://images.unsplash.com/photo-1578575437130-527eed3abbec?auto=format&fit=crop&q=80&w=800",
-      detecciones: [
-        { item: "cajas", cantidad: 18 },
-        { item: "palets", cantidad: 6 },
-        { item: "herramientas", cantidad: 3 }
-      ],
-      summary: "Simulación: Zona de embarque y consolidación. Stock listo para despacho."
+  if (!isOpen) {
+    return null;
+  }
+
+  const resetModal = () => {
+    setPhase(1);
+    setSelectedFile(null);
+    setSelectedImage(null);
+    setImageName("");
+    setDragActive(false);
+    setErrorMessage("");
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
     }
-  ];
+  };
 
-  if (!isOpen) return null;
+  const closeModal = () => {
+    resetModal();
+    onClose();
+  };
 
-  const handleDrag = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.type === "dragenter" || e.type === "dragover") {
+  const processFile = (file: File) => {
+    setErrorMessage("");
+
+    if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+      setErrorMessage(
+        "Formato no permitido. Seleccione una imagen JPG, JPEG o PNG.",
+      );
+      return;
+    }
+
+    if (file.size > MAX_FILE_SIZE) {
+      setErrorMessage(
+        "La imagen supera el tamaño máximo permitido de 8 MB.",
+      );
+      return;
+    }
+
+    if (file.size === 0) {
+      setErrorMessage("La imagen seleccionada está vacía.");
+      return;
+    }
+
+    const reader = new FileReader();
+
+    reader.onload = (event) => {
+      const result = event.target?.result;
+
+      if (typeof result !== "string") {
+        setErrorMessage(
+          "No fue posible previsualizar la imagen.",
+        );
+        return;
+      }
+
+      setSelectedFile(file);
+      setSelectedImage(result);
+      setImageName(file.name);
+      setPhase(2);
+    };
+
+    reader.onerror = () => {
+      setErrorMessage(
+        "Ocurrió un error al leer la imagen seleccionada.",
+      );
+    };
+
+    reader.readAsDataURL(file);
+  };
+
+  const handleDrag = (event: React.DragEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (
+      event.type === "dragenter" ||
+      event.type === "dragover"
+    ) {
       setDragActive(true);
-    } else if (e.type === "dragleave") {
+    }
+
+    if (event.type === "dragleave") {
       setDragActive(false);
     }
   };
 
-  const processFile = (file: File) => {
-    if (file && file.type.startsWith("image/")) {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        setSelectedImage(e.target?.result as string);
-        setImageName(file.name);
-        setPhase(2);
-      };
-      reader.readAsDataURL(file);
-    }
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
+  const handleDrop = (event: React.DragEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
     setDragActive(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      processFile(e.dataTransfer.files[0]);
+
+    const file = event.dataTransfer.files?.[0];
+
+    if (file) {
+      processFile(file);
     }
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      processFile(e.target.files[0]);
+  const handleFileChange = (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = event.target.files?.[0];
+
+    if (file) {
+      processFile(file);
     }
   };
 
-  const selectPreset = (preset: typeof PRESET_IMAGES[0]) => {
-    setSelectedImage(preset.url);
-    setImageName(preset.name);
-    setPhase(2);
-  };
+  const triggerYOLODetection = async () => {
+    if (!selectedFile) {
+      setErrorMessage(
+        "Debe seleccionar una imagen antes de iniciar el análisis.",
+      );
+      setPhase(1);
+      return;
+    }
 
-  const triggerYOLODetection = () => {
+    setErrorMessage("");
     setPhase(3);
 
-    // Simulate Ultralytics YOLO v8 vision inference (1.5 seconds)
-    setTimeout(() => {
-      // Determine if preset or custom file upload
-      const matchedPreset = PRESET_IMAGES.find(p => p.url === selectedImage);
-      
-      const newScanId = `scan-${Date.now().toString().slice(-4)}`;
-      const detections: Detection[] = matchedPreset 
-        ? matchedPreset.detecciones 
-        : [
-            { item: "cajas", cantidad: Math.floor(Math.random() * 25) + 15 },
-            { item: "botellas", cantidad: Math.floor(Math.random() * 15) + 5 },
-            { item: "laptops", cantidad: Math.floor(Math.random() * 8) + 2 },
-            { item: "herramientas", cantidad: Math.floor(Math.random() * 6) + 1 }
-          ];
+    try {
+      const formData = new FormData();
 
-      const summary = matchedPreset
-        ? matchedPreset.summary
-        : `Detección en tiempo real de imagen '${imageName}'. Modelo YOLOv8 analizó la cuadrícula en busca de embalajes rígidos, detectando stock distribuido correctamente.`;
+      // Debe llamarse "file" porque server.ts usa:
+      // upload.single("file")
+      formData.append("file", selectedFile);
 
-      const newScan: InventoryScan = {
-        id: newScanId,
-        fecha: new Date().toISOString().split('T')[0],
-        urlImagen: selectedImage || "mock_warehouse_asset",
-        detecciones: detections,
-        warehouseSummary: summary
-      };
+      const response = await fetch("/api/scan", {
+        method: "POST",
+        body: formData,
+      });
 
-      onScanCreated(newScan);
-      // Reset state
-      setPhase(1);
-      setSelectedImage(null);
-      setImageName("");
-    }, 1500);
-  };
+      const responseData = (await response.json()) as
+        | ScanResponse
+        | ScanErrorResponse;
 
-  const resetModal = () => {
-    setPhase(1);
-    setSelectedImage(null);
-    setImageName("");
+      if (!response.ok || "error" in responseData) {
+        const message =
+          "error" in responseData
+            ? responseData.error
+            : "No fue posible procesar la imagen.";
+
+        throw new Error(message);
+      }
+
+      onScanCreated(responseData);
+      closeModal();
+    } catch (error) {
+      console.error("Error durante el escaneo:", error);
+
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Ocurrió un error inesperado durante el análisis.",
+      );
+
+      // Volvemos a la previsualización para poder intentarlo de nuevo.
+      setPhase(2);
+    }
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      {/* Backdrop */}
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        onClick={phase !== 3 ? onClose : undefined}
+        onClick={phase !== 3 ? closeModal : undefined}
         className="absolute inset-0 bg-slate-950/85 backdrop-blur-md"
         id="modal-backdrop"
       />
 
-      {/* Modal Container */}
       <motion.div
         initial={{ opacity: 0, scale: 0.95, y: 15 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.95, y: 15 }}
         transition={{ type: "spring", duration: 0.4 }}
-        className="relative w-full max-w-xl overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/90 text-slate-100 shadow-2xl glow-blue backdrop-blur-xl"
+        className="relative w-full max-w-xl overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/90 text-slate-100 shadow-2xl backdrop-blur-xl"
         id="modal-container"
       >
-        {/* Glow background accent */}
-        <div className="absolute -top-10 -left-10 h-32 w-32 rounded-full bg-teal-500/10 blur-3xl" />
+        <div className="absolute -left-10 -top-10 h-32 w-32 rounded-full bg-teal-500/10 blur-3xl" />
         <div className="absolute -bottom-10 -right-10 h-32 w-32 rounded-full bg-sky-500/10 blur-3xl" />
 
-        {/* Header */}
         <div className="flex items-center justify-between border-b border-slate-800 px-6 py-4">
           <div className="flex items-center space-x-2">
             <Cpu className="h-5 w-5 text-teal-400" />
-            <span className="font-mono text-xs font-semibold uppercase tracking-wider text-teal-400">YOLO Vision Hub</span>
+
+            <span className="font-mono text-xs font-semibold uppercase tracking-wider text-teal-400">
+              Ultralytics YOLO11n
+            </span>
           </div>
+
           {phase !== 3 && (
             <button
-              onClick={onClose}
+              type="button"
+              onClick={closeModal}
               className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200"
               id="close-modal-btn"
+              aria-label="Cerrar ventana"
             >
               <X className="h-5 w-5" />
             </button>
           )}
         </div>
 
-        {/* Body Content */}
         <div className="p-6">
+          {errorMessage && phase !== 3 && (
+            <div className="mb-4 flex items-start gap-3 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
+              <AlertTriangle className="mt-0.5 h-5 w-5 flex-shrink-0 text-red-400" />
+
+              <div>
+                <p className="font-semibold">
+                  No se pudo realizar el análisis
+                </p>
+                <p className="mt-1 text-xs text-red-300">
+                  {errorMessage}
+                </p>
+              </div>
+            </div>
+          )}
+
           <AnimatePresence mode="wait">
             {phase === 1 && (
               <motion.div
@@ -186,20 +278,23 @@ export default function UploadScanModal({ isOpen, onClose, onScanCreated }: Uplo
                 <h3 className="font-serif text-xl font-medium tracking-tight text-white">
                   Cargar nueva auditoría visual
                 </h3>
+
                 <p className="text-sm text-slate-400">
-                  Suba una fotografía nítida de los estantes o zonas de acopio de su almacén para procesarla con visión computacional.
+                  Seleccione una fotografía clara del almacén para
+                  detectar y contar los objetos presentes.
                 </p>
 
-                {/* Drag and Drop Zone */}
                 <div
                   onDragEnter={handleDrag}
                   onDragOver={handleDrag}
                   onDragLeave={handleDrag}
                   onDrop={handleDrop}
-                  onClick={() => fileInputRef.current?.click()}
-                  className={`group relative flex flex-col items-center justify-center rounded-xl border-2 border-dashed py-8 px-4 text-center cursor-pointer transition-all duration-300 ${
+                  onClick={() =>
+                    fileInputRef.current?.click()
+                  }
+                  className={`group relative flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed px-4 py-8 text-center transition-all duration-300 ${
                     dragActive
-                      ? "border-teal-400 bg-teal-500/10 scale-[0.99]"
+                      ? "scale-[0.99] border-teal-400 bg-teal-500/10"
                       : "border-slate-800 bg-slate-950/40 hover:border-slate-700 hover:bg-slate-950/70"
                   }`}
                   id="drag-drop-zone"
@@ -207,53 +302,27 @@ export default function UploadScanModal({ isOpen, onClose, onScanCreated }: Uplo
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept="image/png, image/jpeg"
+                    accept="image/png,image/jpeg"
                     className="hidden"
                     onChange={handleFileChange}
                     id="scan-image-input"
                   />
-                  
-                  <div className="mb-3 rounded-full bg-slate-900 p-3 text-slate-400 ring-1 ring-slate-800 group-hover:bg-slate-850 group-hover:text-teal-400 group-hover:scale-110 transition-all duration-300">
+
+                  <div className="mb-3 rounded-full bg-slate-900 p-3 text-slate-400 ring-1 ring-slate-800 transition-all duration-300 group-hover:scale-110 group-hover:text-teal-400">
                     <UploadCloud className="h-6 w-6" />
                   </div>
 
                   <p className="text-sm font-medium text-slate-300">
-                    Arrastre y suelte una imagen aquí, o <span className="text-teal-400 underline decoration-teal-400/30 group-hover:text-teal-300">examine sus archivos</span>
+                    Arrastre una imagen aquí o{" "}
+                    <span className="text-teal-400 underline decoration-teal-400/30">
+                      examine sus archivos
+                    </span>
                   </p>
-                  <p className="mt-1.5 text-xs text-slate-500">
-                    Soporta formatos PNG, JPG o JPEG (Recomendado: 1920x1080)
-                  </p>
-                </div>
 
-                {/* Demo Preset Selection */}
-                <div className="space-y-2 pt-2">
-                  <span className="font-mono text-[10px] uppercase tracking-wider text-slate-500">O use un escenario preestablecido</span>
-                  <div className="grid grid-cols-2 gap-3">
-                    {PRESET_IMAGES.map((preset, index) => (
-                      <button
-                        key={index}
-                        onClick={() => selectPreset(preset)}
-                        className="flex items-center space-x-3 rounded-lg border border-slate-800/80 bg-slate-950/30 p-2.5 text-left transition-all hover:border-slate-750 hover:bg-slate-950/65 group"
-                      >
-                        <div className="h-10 w-14 overflow-hidden rounded border border-slate-800 group-hover:border-slate-700 flex-shrink-0">
-                          <img
-                            src={preset.url}
-                            alt={preset.name}
-                            className="h-full w-full object-cover group-hover:scale-105 transition-transform duration-300"
-                            referrerPolicy="no-referrer"
-                          />
-                        </div>
-                        <div className="overflow-hidden">
-                          <p className="truncate font-mono text-xs font-semibold text-slate-300 group-hover:text-teal-400">
-                            {preset.name}
-                          </p>
-                          <p className="truncate text-[10px] text-slate-500">
-                            {preset.detecciones.map(d => `${d.cantidad} ${d.item}`).join(', ')}
-                          </p>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
+                  <p className="mt-1.5 text-xs text-slate-500">
+                    Formatos permitidos: PNG, JPG y JPEG. Tamaño
+                    máximo: 8 MB.
+                  </p>
                 </div>
               </motion.div>
             )}
@@ -266,52 +335,52 @@ export default function UploadScanModal({ isOpen, onClose, onScanCreated }: Uplo
                 exit={{ opacity: 0, x: 10 }}
                 className="space-y-4"
               >
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-3">
                   <h3 className="font-serif text-xl font-medium tracking-tight text-white">
                     Confirmar imagen
                   </h3>
-                  <span className="font-mono text-xs text-slate-400 truncate max-w-[200px] bg-slate-950/60 px-2 py-0.5 rounded border border-slate-850">
+
+                  <span className="max-w-[200px] truncate rounded border border-slate-800 bg-slate-950/60 px-2 py-0.5 font-mono text-xs text-slate-400">
                     {imageName}
                   </span>
                 </div>
 
-                {/* Premium Image Thumbnail Preview */}
                 <div className="relative aspect-video w-full overflow-hidden rounded-xl border border-slate-800 bg-slate-950 shadow-inner">
                   <img
                     src={selectedImage}
-                    alt="Preview"
-                    className="h-full w-full object-cover"
-                    referrerPolicy="no-referrer"
+                    alt={`Previsualización de ${imageName}`}
+                    className="h-full w-full object-contain"
                   />
-                  <div className="absolute inset-0 bg-gradient-to-t from-slate-950/50 to-transparent pointer-events-none" />
-                  
-                  {/* Subtle target grid graphic overlay to make it look technical */}
-                  <div className="absolute inset-4 border border-dashed border-teal-500/20 rounded pointer-events-none flex items-center justify-center">
-                    <div className="w-8 h-8 border-t border-l border-teal-400/40 absolute top-0 left-0" />
-                    <div className="w-8 h-8 border-t border-r border-teal-400/40 absolute top-0 right-0" />
-                    <div className="w-8 h-8 border-b border-l border-teal-400/40 absolute bottom-0 left-0" />
-                    <div className="w-8 h-8 border-b border-r border-teal-400/40 absolute bottom-0 right-0" />
-                    <div className="w-3 h-3 rounded-full bg-teal-400/20 animate-ping" />
+
+                  <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-slate-950/40 to-transparent" />
+
+                  <div className="pointer-events-none absolute inset-4 rounded border border-dashed border-teal-500/20">
+                    <div className="absolute left-0 top-0 h-8 w-8 border-l border-t border-teal-400/40" />
+                    <div className="absolute right-0 top-0 h-8 w-8 border-r border-t border-teal-400/40" />
+                    <div className="absolute bottom-0 left-0 h-8 w-8 border-b border-l border-teal-400/40" />
+                    <div className="absolute bottom-0 right-0 h-8 w-8 border-b border-r border-teal-400/40" />
                   </div>
                 </div>
 
-                {/* Action Buttons */}
                 <div className="grid grid-cols-2 gap-4 pt-2">
                   <button
+                    type="button"
                     onClick={resetModal}
                     className="flex items-center justify-center space-x-2 rounded-xl border border-slate-800 bg-slate-950/40 py-3 text-sm font-semibold text-slate-400 transition-all hover:bg-slate-950 hover:text-slate-200"
                     id="cancel-upload-btn"
                   >
                     <X className="h-4 w-4" />
-                    <span>[X] Cancelar</span>
+                    <span>Cambiar imagen</span>
                   </button>
+
                   <button
+                    type="button"
                     onClick={triggerYOLODetection}
-                    className="flex items-center justify-center space-x-2 rounded-xl bg-teal-500 py-3 text-sm font-semibold text-slate-950 shadow-lg shadow-teal-500/20 transition-all hover:bg-teal-400 hover:scale-[1.02] hover:shadow-teal-400/30"
+                    className="flex items-center justify-center space-x-2 rounded-xl bg-teal-500 py-3 text-sm font-semibold text-slate-950 shadow-lg shadow-teal-500/20 transition-all hover:scale-[1.02] hover:bg-teal-400"
                     id="run-yolo-btn"
                   >
                     <Check className="h-4 w-4" />
-                    <span>[✓] Iniciar YOLO</span>
+                    <span>Iniciar análisis</span>
                   </button>
                 </div>
               </motion.div>
@@ -322,40 +391,46 @@ export default function UploadScanModal({ isOpen, onClose, onScanCreated }: Uplo
                 key="phase-3"
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
-                className="flex flex-col items-center justify-center py-10 text-center space-y-6"
+                className="flex flex-col items-center justify-center space-y-6 py-10 text-center"
               >
-                {/* Advanced Pulsing Scanning Ring */}
                 <div className="relative flex items-center justify-center">
-                  <div className="absolute h-28 w-28 rounded-full border-2 border-teal-500/10 animate-pulse" />
-                  <div className="absolute h-24 w-24 rounded-full border border-dashed border-teal-400/30 animate-spin [animation-duration:8s]" />
-                  <div className="absolute h-20 w-20 rounded-full border border-teal-500/40 animate-ping [animation-duration:1.5s]" />
-                  
-                  {/* Central Glow Core */}
-                  <div className="relative flex h-16 w-16 items-center justify-center rounded-full bg-teal-950 border border-teal-500/60 shadow-lg shadow-teal-500/30">
-                    <RefreshCw className="h-7 w-7 text-teal-400 animate-spin" />
+                  <div className="absolute h-28 w-28 animate-pulse rounded-full border-2 border-teal-500/10" />
+
+                  <div className="absolute h-24 w-24 animate-spin rounded-full border border-dashed border-teal-400/30 [animation-duration:8s]" />
+
+                  <div className="absolute h-20 w-20 animate-ping rounded-full border border-teal-500/40 [animation-duration:1.5s]" />
+
+                  <div className="relative flex h-16 w-16 items-center justify-center rounded-full border border-teal-500/60 bg-teal-950 shadow-lg shadow-teal-500/30">
+                    <RefreshCw className="h-7 w-7 animate-spin text-teal-400" />
                   </div>
                 </div>
 
-                {/* Process Details */}
                 <div className="space-y-2">
-                  <p className="font-mono text-xs font-semibold uppercase tracking-widest text-teal-400 animate-pulse">
-                    ANALIZANDO CON ULTRALYTICS YOLOv8
+                  <p className="animate-pulse font-mono text-xs font-semibold uppercase tracking-widest text-teal-400">
+                    Analizando con Ultralytics YOLO11n
                   </p>
+
                   <h4 className="font-serif text-lg font-medium text-white">
-                    Escaneando cuadriculado e inventariando
+                    Detectando y contando objetos
                   </h4>
-                  <p className="text-xs text-slate-500 max-w-sm mx-auto font-mono">
-                    Segmentando capas, extrayendo bounding boxes e identificando cajas, botellas y herramientas...
+
+                  <p className="mx-auto max-w-sm font-mono text-xs text-slate-500">
+                    La imagen está siendo enviada al modelo de visión
+                    por computador. Este proceso puede tardar algunos
+                    segundos.
                   </p>
                 </div>
 
-                {/* Animated Horizontal Scan Line in miniature */}
-                <div className="w-full max-w-xs h-1.5 bg-slate-950 rounded-full overflow-hidden relative border border-slate-850">
+                <div className="relative h-1.5 w-full max-w-xs overflow-hidden rounded-full border border-slate-800 bg-slate-950">
                   <motion.div
                     initial={{ left: "-100%" }}
                     animate={{ left: "100%" }}
-                    transition={{ repeat: Infinity, duration: 1.2, ease: "linear" }}
-                    className="absolute top-0 bottom-0 w-1/3 bg-gradient-to-r from-transparent via-teal-400 to-transparent"
+                    transition={{
+                      repeat: Infinity,
+                      duration: 1.2,
+                      ease: "linear",
+                    }}
+                    className="absolute bottom-0 top-0 w-1/3 bg-gradient-to-r from-transparent via-teal-400 to-transparent"
                   />
                 </div>
               </motion.div>

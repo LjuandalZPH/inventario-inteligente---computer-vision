@@ -1,280 +1,244 @@
 #!/usr/bin/env python3
 """
 scripts/inference_worker.py
---------------------------
-Production-ready backend inference client optimized for serverless ML runtimes.
-Invokes the remote Ultralytics YOLO REST API to execute predictions, avoiding
-local model initialization and dependency footprint.
 
-Communication:
-- Input: Receives image data through stdin (raw binary bytes or base64 encoded stream)
-         or accepts a local file path as the first command-line argument.
-- Output: Streams a strictly structured JSON response conforming to the YoloInferenceResponse
-          contract directly to standard output (stdout).
+Ejecuta inferencia local con Ultralytics YOLO11n.
+
+Entrada:
+- Bytes binarios de una imagen mediante stdin.
+- Opcionalmente, una ruta de imagen como primer argumento.
+
+Salida:
+- Un único objeto JSON por stdout.
+- Los mensajes internos de Ultralytics se redirigen a stderr para no
+  interferir con la respuesta JSON que espera server.ts.
 """
 
-import sys
-import json
-import time
+from __future__ import annotations
+
 import io
-import base64
+import json
 import os
-import urllib.request
-import urllib.error
-from typing import Dict, List, Any, Optional, Tuple
+import sys
+import time
+from contextlib import redirect_stdout
+from pathlib import Path
+from typing import Any
 
-# Load environment variables from .env if available
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
+from PIL import Image, UnidentifiedImageError
+from ultralytics import YOLO
 
-# Nomenclature translation: Map standard COCO class labels to specialized industrial warehouse categories in Spanish.
-LABEL_TRANSLATION_MAP: Dict[str, str] = {
-    'bottle': 'botellas',
-    'laptop': 'laptops',
-    'keyboard': 'laptops',
-    'suitcase': 'cajas',
-    'backpack': 'cajas',
-    'handbag': 'cajas',
-    'scissors': 'herramientas',
-    'scissors/tools': 'herramientas',
-    'knife': 'herramientas',
-}
 
-CLASS_ID_MAP: Dict[int, str] = {
-    39: 'botellas',
-    63: 'laptops',
-    66: 'laptops',
-    28: 'cajas',
-    24: 'cajas',
-    26: 'cajas',
-    76: 'herramientas',
+# Traducción temporal de clases COCO a las categorías actuales del MVP.
+#
+# Importante:
+# - "bottle" y "laptop" sí corresponden directamente.
+# - "scissors" se usa como ejemplo de herramienta.
+# - "backpack", "handbag" y "suitcase" se muestran como "cajas" únicamente
+#   para validar el flujo del MVP; no equivalen a cajas de cartón.
+CLASS_TRANSLATION: dict[str, str] = {
+    "bottle": "botellas",
+    "laptop": "laptops",
+    "scissors": "herramientas",
+    "backpack": "cajas",
+    "handbag": "cajas",
+    "suitcase": "cajas",
 }
 
 
-def send_response(status: str, predictions: List[Dict[str, Any]], inference_time_ms: float, error_msg: Optional[str] = None) -> None:
-    """
-    Formatea y escribe la respuesta JSON en stdout.
-    Garantiza compatibilidad con el contrato YoloInferenceResponse.
-    """
-    response = {
+def send_response(
+    *,
+    status: str,
+    predictions: list[dict[str, Any]],
+    inference_time_ms: float,
+    error: str | None = None,
+) -> None:
+    """Escribe una respuesta JSON limpia en stdout."""
+
+    payload: dict[str, Any] = {
         "status": status,
         "predictions": predictions,
-        "inferenceTimeMs": round(inference_time_ms, 2)
+        "inferenceTimeMs": round(inference_time_ms, 2),
     }
-    if error_msg:
-        response["error"] = error_msg
-        
-    sys.stdout.write(json.dumps(response))
+
+    if error:
+        payload["error"] = error
+
+    sys.stdout.write(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
     sys.stdout.flush()
 
 
-def decode_image_bytes(image_bytes: bytes) -> bytes:
-    """
-    Normaliza el flujo de bytes decodificando base64 si es necesario.
-    Retorna la secuencia limpia de bytes de la imagen lista para la transmisión.
-    """
+def read_image_bytes() -> bytes:
+    """Lee la imagen desde una ruta o desde stdin."""
+
+    if len(sys.argv) > 1:
+        image_path = Path(sys.argv[1])
+
+        if not image_path.is_file():
+            raise FileNotFoundError(
+                f"No se encontró la imagen: {image_path}"
+            )
+
+        return image_path.read_bytes()
+
+    return sys.stdin.buffer.read()
+
+
+def open_image(image_bytes: bytes) -> Image.Image:
+    """Valida y abre la imagen con Pillow."""
+
     if not image_bytes:
-        return b''
-        
+        raise ValueError("No se recibieron datos de imagen.")
+
     try:
-        if image_bytes.startswith(b'data:image'):
-            # Strip data URI header
-            header, base64_data = image_bytes.split(b',', 1)
-            return base64.b64decode(base64_data)
-        else:
-            # Check if it is a pure base64 stream
-            return base64.b64decode(image_bytes, validate=True)
-    except Exception:
-        # Fallback: Treat as raw image bytes
-        return image_bytes
+        image = Image.open(io.BytesIO(image_bytes))
+        image.load()
+        return image.convert("RGB")
+    except UnidentifiedImageError as exc:
+        raise ValueError(
+            "El archivo recibido no es una imagen válida."
+        ) from exc
 
 
-def encode_multipart_formdata(fields: Dict[str, Any], files: Dict[str, Tuple[str, bytes, str]]) -> Tuple[bytes, Dict[str, str]]:
-    """
-    Construye de forma nativa un payload multipart/form-data.
-    Permite subir imágenes binarias sin dependencias externas como requests.
-    """
-    boundary = b'----SmartInventoryBoundaryYOLOv8InferenceClient'
-    lines = []
-    
-    # Add form fields
-    for key, value in fields.items():
-        lines.append(b'--' + boundary)
-        lines.append(f'Content-Disposition: form-data; name="{key}"'.encode('utf-8'))
-        lines.append(b'')
-        lines.append(str(value).encode('utf-8'))
-        
-    # Add binary files
-    for key, (filename, content, mimetype) in files.items():
-        lines.append(b'--' + boundary)
-        lines.append(f'Content-Disposition: form-data; name="{key}"; filename="{filename}"'.encode('utf-8'))
-        lines.append(f'Content-Type: {mimetype}'.encode('utf-8'))
-        lines.append(b'')
-        lines.append(content)
-        
-    lines.append(b'--' + boundary + b'--')
-    lines.append(b'')
-    body = b'\r\n'.join(lines)
-    
-    headers = {
-        'Content-Type': f'multipart/form-data; boundary={boundary.decode("utf-8")}',
-        'Content-Length': str(len(body))
+def get_model_name() -> str:
+    """Obtiene el modelo configurado para el MVP."""
+
+    return os.getenv("YOLO_MODEL", "yolo11n.pt").strip() or "yolo11n.pt"
+
+
+def get_confidence() -> float:
+    """Obtiene y valida el umbral de confianza."""
+
+    raw_value = os.getenv("YOLO_CONFIDENCE", "0.35").strip()
+
+    try:
+        confidence = float(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            "YOLO_CONFIDENCE debe ser un número entre 0 y 1."
+        ) from exc
+
+    if not 0.0 <= confidence <= 1.0:
+        raise ValueError(
+            "YOLO_CONFIDENCE debe estar entre 0 y 1."
+        )
+
+    return confidence
+
+
+def run_inference(image: Image.Image) -> tuple[list[dict[str, Any]], float]:
+    """Carga YOLO11n, analiza la imagen y normaliza las detecciones."""
+
+    model_name = get_model_name()
+    confidence = get_confidence()
+    device = os.getenv("YOLO_DEVICE", "").strip()
+
+    # Ultralytics puede imprimir mensajes al cargar o descargar el modelo.
+    # Los enviamos a stderr para mantener stdout reservado para el JSON.
+    with redirect_stdout(sys.stderr):
+        model = YOLO(model_name)
+
+    prediction_options: dict[str, Any] = {
+        "source": image,
+        "conf": confidence,
+        "verbose": False,
     }
-    return body, headers
+
+    if device:
+        prediction_options["device"] = device
+
+    prediction_start = time.perf_counter()
+
+    with redirect_stdout(sys.stderr):
+        results = model.predict(**prediction_options)
+
+    inference_time_ms = (
+        time.perf_counter() - prediction_start
+    ) * 1000.0
+
+    if not results:
+        return [], inference_time_ms
+
+    result = results[0]
+    boxes = result.boxes
+
+    if boxes is None or len(boxes) == 0:
+        return [], inference_time_ms
+
+    coordinates = boxes.xyxy.cpu().tolist()
+    confidences = boxes.conf.cpu().tolist()
+    class_ids = boxes.cls.cpu().tolist()
+
+    predictions: list[dict[str, Any]] = []
+
+    for raw_box, raw_score, raw_class_id in zip(
+        coordinates,
+        confidences,
+        class_ids,
+    ):
+        class_id = int(raw_class_id)
+        original_class_name = str(
+            result.names[class_id]
+        ).strip().lower()
+
+        mapped_class_name = CLASS_TRANSLATION.get(
+            original_class_name
+        )
+
+        # El MVP solo conserva las clases que puede mostrar en su inventario.
+        if mapped_class_name is None:
+            continue
+
+        predictions.append(
+            {
+                "box": [
+                    round(float(value), 2)
+                    for value in raw_box[:4]
+                ],
+                "score": round(float(raw_score), 4),
+                "classId": class_id,
+                "className": mapped_class_name,
+            }
+        )
+
+    return predictions, inference_time_ms
 
 
 def main() -> None:
-    start_time = time.time()
-    
-    # 1. Load configurations from environment variables
-    api_key = os.getenv("ULTRALYTICS_API_KEY")
-    model_id = os.getenv("ULTRALYTICS_MODEL_ID", "yolov8n") # Fallback default model
-    api_url = os.getenv("ULTRALYTICS_API_URL")
-    
-    # Construct base prediction URL if not explicitly defined
-    if not api_url:
-        api_url = f"https://api.ultralytics.com/v1/predict/{model_id}"
+    worker_start = time.perf_counter()
 
-    # 2. Check Authentication Key
-    if not api_key:
-        send_response(
-            status="failed",
-            predictions=[],
-            inference_time_ms=(time.time() - start_time) * 1000.0,
-            error_msg="La variable de entorno ULTRALYTICS_API_KEY no está configurada. Configure su API key en el archivo .env."
-        )
-        sys.exit(0)
-
-    # 3. Read image input stream
-    image_bytes = b''
     try:
-        if len(sys.argv) > 1:
-            # Read from local file path argument
-            file_path = sys.argv[1]
-            with open(file_path, 'rb') as f:
-                image_bytes = f.read()
-        else:
-            # Read image bytes from stdin stream
-            image_bytes = sys.stdin.buffer.read()
-            
-        if not image_bytes:
-            raise ValueError("No se recibieron datos de imagen.")
-            
-        image_bytes = decode_image_bytes(image_bytes)
-    except Exception as e:
-        send_response(
-            status="failed",
-            predictions=[],
-            inference_time_ms=(time.time() - start_time) * 1000.0,
-            error_msg=f"Error al leer/decodificar imagen de entrada: {str(e)}"
+        image_bytes = read_image_bytes()
+        image = open_image(image_bytes)
+
+        predictions, inference_time_ms = run_inference(
+            image
         )
-        sys.exit(0)
 
-    # 4. Dispatch REST API call
-    try:
-        inference_start = time.time()
-        
-        # Prepare parameters and files for transmission
-        fields = {"conf": 0.25}
-        files = {"file": ("image.jpg", image_bytes, "image/jpeg")}
-        
-        body, content_headers = encode_multipart_formdata(fields, files)
-        
-        # Merge headers including Authentication Token
-        headers = {
-            **content_headers,
-            "Authorization": f"Bearer {api_key}",
-            "x-api-key": api_key # Fallback header structure
-        }
-        
-        # Setup request object
-        req = urllib.request.Request(api_url, data=body, headers=headers, method="POST")
-        
-        # Execute Remote Request with a 30 second timeout
-        with urllib.request.urlopen(req, timeout=30) as response:
-            response_bytes = response.read()
-            response_json = json.loads(response_bytes.decode("utf-8"))
-            
-        inference_time_ms = (time.time() - inference_start) * 1000.0
-
-        # 5. Parse and map remote predictions list
-        raw_predictions = []
-        if isinstance(response_json, list):
-            raw_predictions = response_json
-        elif isinstance(response_json, dict):
-            # Parse common platform JSON wrapper keys
-            if "results" in response_json:
-                raw_predictions = response_json["results"]
-            elif "predictions" in response_json:
-                raw_predictions = response_json["predictions"]
-            elif "data" in response_json:
-                raw_predictions = response_json["data"]
-            else:
-                # Check if dictionary contains model fields directly
-                raw_predictions = [response_json]
-
-        predictions: List[Dict[str, Any]] = []
-        
-        for pred in raw_predictions:
-            if not isinstance(pred, dict):
-                continue
-                
-            # Parse bounding box format (dict or list format support)
-            raw_box = pred.get("box", [0, 0, 0, 0])
-            box = [0.0, 0.0, 0.0, 0.0]
-            if isinstance(raw_box, dict):
-                box = [
-                    float(raw_box.get("x1", 0)),
-                    float(raw_box.get("y1", 0)),
-                    float(raw_box.get("x2", 0)),
-                    float(raw_box.get("y2", 0))
-                ]
-            elif isinstance(raw_box, list) and len(raw_box) >= 4:
-                box = [float(coord) for coord in raw_box[:4]]
-
-            score = float(pred.get("confidence", pred.get("score", 1.0)))
-            class_id = int(pred.get("class", pred.get("classId", 0)))
-            orig_name = str(pred.get("name", pred.get("className", "unknown")))
-            
-            # Map COCO prediction nomenclature to Spanish Warehouse classification
-            class_name = orig_name
-            if orig_name in LABEL_TRANSLATION_MAP:
-                class_name = LABEL_TRANSLATION_MAP[orig_name]
-            elif class_id in CLASS_ID_MAP:
-                class_name = CLASS_ID_MAP[class_id]
-
-            predictions.append({
-                "box": [round(coord, 2) for coord in box],
-                "score": round(score, 4),
-                "classId": class_id,
-                "className": class_name
-            })
-            
         send_response(
             status="success",
             predictions=predictions,
-            inference_time_ms=inference_time_ms
+            inference_time_ms=inference_time_ms,
         )
 
-    except urllib.error.HTTPError as he:
-        err_msg = he.read().decode("utf-8")
+    except Exception as exc:
+        total_time_ms = (
+            time.perf_counter() - worker_start
+        ) * 1000.0
+
         send_response(
             status="failed",
             predictions=[],
-            inference_time_ms=(time.time() - start_time) * 1000.0,
-            error_msg=f"La API de Ultralytics reportó error HTTP {he.code}: {err_msg}"
-        )
-    except Exception as e:
-        send_response(
-            status="failed",
-            predictions=[],
-            inference_time_ms=(time.time() - start_time) * 1000.0,
-            error_msg=f"Inferencia remota fallida: {str(e)}"
+            inference_time_ms=total_time_ms,
+            error=f"No fue posible ejecutar YOLO11n: {exc}",
         )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
