@@ -17,9 +17,11 @@ import {
 import { AnimatePresence, motion } from "motion/react";
 
 import type {
+  AllowedItemType,
   InventoryItem,
   ScanReport,
 } from "../types/inventory";
+import InventoryTotals from "./components/inventory/inventory-totals";
 import ReportDetail from "./components/inventory/report-detail";
 import UploadScanModal from "./components/inventory/upload-modal";
 import { downloadAuditsLogExcel } from "./lib/export-excel";
@@ -34,9 +36,16 @@ interface ApiHealthResponse {
 type ApiStatus = "checking" | "online" | "offline";
 
 interface ActiveRoute {
-  path: "dashboard" | "report";
+  path: "dashboard" | "inventory" | "report";
   id?: string;
 }
+
+const ITEM_CATEGORIES: AllowedItemType[] = [
+  "cajas",
+  "botellas",
+  "laptops",
+  "herramientas",
+];
 
 function createValidatedSummary(
   detections: InventoryItem[],
@@ -155,6 +164,37 @@ export default function App() {
         return scanTotal + reportTotal;
       }, 0);
   }, [scans]);
+
+  const inventoryTotals = useMemo(() => {
+    const totals = ITEM_CATEGORIES.reduce(
+      (categoryTotals, category) => ({
+        ...categoryTotals,
+        [category]: 0,
+      }),
+      {} as Record<AllowedItemType, number>,
+    );
+
+    scans
+      .filter((scan) => scan.confirmado)
+      .forEach((scan) => {
+        scan.detecciones.forEach((detection) => {
+          totals[detection.item] += detection.cantidad;
+        });
+      });
+
+    return totals;
+  }, [scans]);
+
+  const confirmedScansCount = useMemo(() => {
+    return scans.filter((scan) => scan.confirmado).length;
+  }, [scans]);
+
+  const inventoryGrandTotal = useMemo(() => {
+    return ITEM_CATEGORIES.reduce(
+      (total, category) => total + inventoryTotals[category],
+      0,
+    );
+  }, [inventoryTotals]);
 
   const activeAlertsCount = useMemo(() => {
     return scans.reduce((alertCount, scan) => {
@@ -318,9 +358,21 @@ export default function App() {
                 Panel
               </button>
 
-              <span className="cursor-not-allowed opacity-40">
+              <button
+                type="button"
+                onClick={() =>
+                  setActiveRoute({
+                    path: "inventory",
+                  })
+                }
+                className={`border-b-2 py-5 transition-colors hover:text-slate-100 ${
+                  activeRoute.path === "inventory"
+                    ? "border-cyan-400 text-cyan-400"
+                    : "border-transparent"
+                }`}
+              >
                 Inventario
-              </span>
+              </button>
 
               <span className="cursor-not-allowed opacity-40">
                 Reportes
@@ -699,6 +751,31 @@ export default function App() {
                     <ArrowRight className="h-4 w-4" />
                   </button>
                 </div>
+              </motion.div>
+            ) : activeRoute.path === "inventory" ? (
+              <motion.div
+                key="inventory-view"
+                initial={{
+                  opacity: 0,
+                  y: 15,
+                }}
+                animate={{
+                  opacity: 1,
+                  y: 0,
+                }}
+                exit={{
+                  opacity: 0,
+                  y: -15,
+                }}
+                transition={{
+                  duration: 0.3,
+                }}
+              >
+                <InventoryTotals
+                  totals={inventoryTotals}
+                  grandTotal={inventoryGrandTotal}
+                  confirmedScansCount={confirmedScansCount}
+                />
               </motion.div>
             ) : (
               <motion.div
