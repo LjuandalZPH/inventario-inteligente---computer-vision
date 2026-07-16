@@ -25,6 +25,10 @@ import InventoryTotals from "./components/inventory/inventory-totals";
 import ReportDetail from "./components/inventory/report-detail";
 import UploadScanModal from "./components/inventory/upload-modal";
 import { downloadAuditsLogExcel } from "./lib/export-excel";
+import {
+  loadScans,
+  persistScans,
+} from "./lib/scan-persistence";
 
 interface ApiHealthResponse {
   status: "ok";
@@ -66,6 +70,7 @@ function createValidatedSummary(
 
 export default function App() {
   const [scans, setScans] = useState<ScanReport[]>([]);
+  const [isHydrated, setIsHydrated] = useState(false);
   const [activeRoute, setActiveRoute] =
     useState<ActiveRoute>({
       path: "dashboard",
@@ -77,6 +82,54 @@ export default function App() {
     useState<ApiStatus>("checking");
   const [modelConfigured, setModelConfigured] =
     useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const hydrateScans = async () => {
+      try {
+        const storedScans = await loadScans();
+
+        if (!cancelled) {
+          setScans(storedScans);
+        }
+      } catch (error: unknown) {
+        console.error(
+          "No fue posible cargar los escaneos guardados:",
+          error,
+        );
+      } finally {
+        if (!cancelled) {
+          setIsHydrated(true);
+        }
+      }
+    };
+
+    void hydrateScans();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isHydrated) {
+      return;
+    }
+
+    const persistTimeout = window.setTimeout(() => {
+      void persistScans(scans).catch((error: unknown) => {
+        console.error(
+          "No fue posible guardar los escaneos:",
+          error,
+        );
+      });
+    }, 250);
+
+    return () => {
+      window.clearTimeout(persistTimeout);
+    };
+  }, [scans, isHydrated]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -389,7 +442,8 @@ export default function App() {
             onClick={() =>
               setIsUploadModalOpen(true)
             }
-            className="flex items-center space-x-1 rounded-lg bg-cyan-600 px-4 py-2 text-xs font-bold uppercase tracking-widest text-white shadow-lg shadow-cyan-950 transition-colors hover:bg-cyan-500"
+            disabled={!isHydrated}
+            className="flex items-center space-x-1 rounded-lg bg-cyan-600 px-4 py-2 text-xs font-bold uppercase tracking-widest text-white shadow-lg shadow-cyan-950 transition-colors hover:bg-cyan-500 disabled:cursor-not-allowed disabled:opacity-50"
             id="new-scan-trigger-btn"
           >
             <Plus className="h-4 w-4" />
