@@ -426,14 +426,6 @@ export default function App() {
               >
                 Inventario
               </button>
-
-              <span className="cursor-not-allowed opacity-40">
-                Reportes
-              </span>
-
-              <span className="cursor-not-allowed opacity-40">
-                Configuración
-              </span>
             </div>
           </div>
 
@@ -906,8 +898,6 @@ export default function App() {
           </div>
 
           <div className="flex gap-4 md:gap-6">
-            <span>SPRINT 1</span>
-
             <span className="flex items-center gap-1.5 text-teal-400">
               <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-teal-400" />
               YOLO11n
