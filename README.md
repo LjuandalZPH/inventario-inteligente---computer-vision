@@ -501,7 +501,7 @@ Reporte visual y PDF
 
 - Consulta de la información del análisis.
 - Descarga de reporte en PDF.
-- Descarga de reporte en Excel: pendiente.
+- Descarga de reporte en Excel.
 - Uso desde navegador y adaptación móvil: pendientes según el alcance definido.
 
 ---

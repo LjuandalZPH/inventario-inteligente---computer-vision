@@ -11,6 +11,7 @@ import {
   Download,
   Eye,
   EyeOff,
+  FileSpreadsheet,
   GlassWater,
   Info,
   Laptop,
@@ -31,6 +32,7 @@ import type {
   InventoryPrediction,
   ScanReport,
 } from "../../../types/inventory";
+import { downloadScanReportExcel } from "../../lib/export-excel";
 
 interface ReportDetailProps {
   scan: ScanReport;
@@ -369,7 +371,12 @@ export default function ReportDetail({
     useState(true);
   const [isGeneratingPdf, setIsGeneratingPdf] =
     useState(false);
+  const [isGeneratingExcel, setIsGeneratingExcel] =
+    useState(false);
   const [pdfError, setPdfError] = useState<
+    string | null
+  >(null);
+  const [excelError, setExcelError] = useState<
     string | null
   >(null);
   const [containerSize, setContainerSize] =
@@ -1052,6 +1059,27 @@ export default function ReportDetail({
     }
   };
 
+  const handleDownloadExcel = async () => {
+    if (isGeneratingExcel) {
+      return;
+    }
+
+    setIsGeneratingExcel(true);
+    setExcelError(null);
+
+    try {
+      await downloadScanReportExcel(scan);
+    } catch (error) {
+      setExcelError(
+        error instanceof Error
+          ? error.message
+          : "No fue posible generar el reporte Excel.",
+      );
+    } finally {
+      setIsGeneratingExcel(false);
+    }
+  };
+
   return (
     <div
       className="mx-auto max-w-7xl space-y-6 px-4 pb-24 md:px-6"
@@ -1718,6 +1746,15 @@ export default function ReportDetail({
         </div>
       )}
 
+      {excelError && (
+        <div
+          role="alert"
+          className="rounded-xl border border-rose-500/30 bg-rose-950/30 px-4 py-3 text-sm text-rose-200"
+        >
+          {excelError}
+        </div>
+      )}
+
       <div className="mt-8 flex flex-col items-center justify-between gap-4 rounded-2xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl backdrop-blur-md sm:flex-row">
         <div className="text-center sm:text-left">
           <p className="text-sm font-semibold text-slate-200">
@@ -1760,6 +1797,26 @@ export default function ReportDetail({
               {isGeneratingPdf
                 ? "Generando PDF..."
                 : "Descargar PDF"}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleDownloadExcel}
+            disabled={isGeneratingExcel}
+            className="flex w-full items-center justify-center space-x-2 rounded-xl border border-cyan-500/30 bg-cyan-950/30 px-6 py-3 text-center text-sm font-semibold text-cyan-300 transition-all hover:border-cyan-400/50 hover:bg-cyan-950/50 hover:text-cyan-200 disabled:cursor-wait disabled:opacity-60 sm:w-auto"
+            id="download-excel-btn"
+          >
+            {isGeneratingExcel ? (
+              <LoaderCircle className="h-4 w-4 animate-spin" />
+            ) : (
+              <FileSpreadsheet className="h-4 w-4" />
+            )}
+
+            <span>
+              {isGeneratingExcel
+                ? "Generando Excel..."
+                : "Descargar Excel"}
             </span>
           </button>
 

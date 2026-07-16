@@ -7,6 +7,7 @@ import {
   Calendar,
   CheckCircle,
   Database,
+  FileSpreadsheet,
   Layers,
   Package,
   Plus,
@@ -21,6 +22,7 @@ import type {
 } from "../types/inventory";
 import ReportDetail from "./components/inventory/report-detail";
 import UploadScanModal from "./components/inventory/upload-modal";
+import { downloadAuditsLogExcel } from "./lib/export-excel";
 
 interface ApiHealthResponse {
   status: "ok";
@@ -234,6 +236,10 @@ export default function App() {
           : scan,
       ),
     );
+  };
+
+  const handleDownloadAuditsExcel = () => {
+    void downloadAuditsLogExcel(filteredScans);
   };
 
   const apiStatusLabel = (() => {
@@ -507,9 +513,22 @@ export default function App() {
                       </span>
                     </div>
 
-                    <span className="font-mono text-xs text-slate-500">
-                      {filteredScans.length} registros
-                    </span>
+                    <div className="flex items-center gap-3">
+                      <span className="font-mono text-xs text-slate-500">
+                        {filteredScans.length} registros
+                      </span>
+
+                      <button
+                        type="button"
+                        onClick={handleDownloadAuditsExcel}
+                        disabled={filteredScans.length === 0}
+                        className="inline-flex items-center space-x-2 rounded-lg border border-teal-500/30 bg-teal-950/30 px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-teal-300 transition-all hover:border-teal-400/50 hover:bg-teal-950/50 hover:text-teal-200 disabled:cursor-not-allowed disabled:border-slate-800 disabled:bg-slate-950/40 disabled:text-slate-600"
+                        id="download-audits-excel-btn"
+                      >
+                        <FileSpreadsheet className="h-3.5 w-3.5" />
+                        <span>Exportar Excel</span>
+                      </button>
+                    </div>
                   </div>
 
                   <div className="glass teal-glow flex flex-col overflow-x-auto rounded-2xl">
